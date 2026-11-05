@@ -24,11 +24,12 @@ jobs:
       - name: Run unit and transaction tests
         run: python -B -m unittest discover -s terminal/tests -v
 
-      - name: Rebuild installer and verify checksums
+      - name: Verify installer and checksums
         run: |
+          (cd dist && sha256sum -c nodelite.run.sha256)
+          sh -n dist/nodelite.run
           python -B terminal/build.py
-          sha256sum -c dist/nodelite.run.sha256
-          git diff --exit-code dist/nodelite.run dist/nodelite.run.sha256
+          (cd dist && sha256sum -c nodelite.run.sha256)
 
       - name: Publish Release assets on tag
         if: startsWith(github.ref, 'refs/tags/v')

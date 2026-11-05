@@ -1,5 +1,6 @@
 """Build one uploadable installer; never embeds VPS addresses or credentials."""
 import base64
+import gzip
 import hashlib
 import io
 from pathlib import Path
@@ -9,12 +10,13 @@ root = Path(__file__).resolve().parent
 out = root.parent/'dist'
 out.mkdir(exist_ok=True)
 buffer = io.BytesIO()
-with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
-    for name in ['nodelite.py', 'runtime.py', 'protocols.py']:
-        data = (root/name).read_bytes().replace(b'\r\n', b'\n')
-        item = tarfile.TarInfo(name)
-        item.size, item.mode, item.mtime = len(data), 0o600, 0
-        archive.addfile(item, io.BytesIO(data))
+with gzip.GzipFile(filename='', mode='wb', fileobj=buffer, mtime=0) as gz:
+    with tarfile.open(fileobj=gz, mode='w') as archive:
+        for name in ['nodelite.py', 'runtime.py', 'protocols.py']:
+            data = (root/name).read_bytes().replace(b'\r\n', b'\n')
+            item = tarfile.TarInfo(name)
+            item.size, item.mode, item.mtime = len(data), 0o600, 0
+            archive.addfile(item, io.BytesIO(data))
 payload = buffer.getvalue()
 digest = hashlib.sha256(payload).hexdigest()
 script = (root/'install.sh').read_text(encoding='utf-8')
