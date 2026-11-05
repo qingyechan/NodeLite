@@ -281,9 +281,10 @@ class SubscriptionAndSyncTests(unittest.TestCase):
             conn.close()
 
             # Modify port (including port 443) -> automatically syncs subscription
-            updated = rt.update_node_port(vless['id'], 443, 28443)
-            self.assertEqual(updated['port'], 443)
-            self.assertEqual(updated['public_port'], 28443)
+            new_int_port = rt.free_tcp_port()
+            updated = rt.update_node_port(vless['id'], new_int_port, 443)
+            self.assertEqual(updated['port'], new_int_port)
+            self.assertEqual(updated['public_port'], 443)
             self.assertEqual(updated['uuid'], vless['uuid'])
             self.assertEqual(updated['public_key'], vless['public_key'])
 
@@ -292,7 +293,7 @@ class SubscriptionAndSyncTests(unittest.TestCase):
             b64_body = conn.getresponse().read().decode('utf-8')
             conn.close()
             decoded_uri = base64.b64decode(b64_body).decode('utf-8')
-            self.assertIn(':28443?', decoded_uri)
+            self.assertIn(':443?', decoded_uri)
 
             # Rotate token -> old token returns 404, new token returns 200
             old_token = cfg['token']
