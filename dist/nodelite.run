@@ -90,7 +90,7 @@ fi
 printf '3/4 安装终端菜单（支持 nl / NL 启动）……\n'
 # Replaced by build.py with a self-contained, checksummed source archive.
 cat > "$work/payload.b64" <<'PAYLOAD'
-H4sIAB2Q7GoC/+y9eXcb17Unmr/5KSrKu6+AiARHDWYubj9Zpm11NC2R8h1oPjSIQUKEgQFADVFz
+H4sIAEGR7GoC/+y9eXcb17Unmr/5KSrKu6+AiARHDWYubj9Zpm11NC2R8h1oPjSIQUKEgQFADVFz
 LSmxbMnW5HiWZMtyPCWOJcVJLFmD9V0SAiT/yld4ezpT1SkAkp2k3+pO97WIqlNn3Gefffbw2/VG
 sVSttEuZpRM/+Hv9bwz+t3VsjP4di/47Pr51cmybesbPx8fGJyZ+EIz94B/wv+VWO9+E5n/wv+f/
 fvTD0eVWc3SxUh8t1Y8GSyfahxv1yaFNmzbtBcrYDZQxHeTrQaM+UizV8vXicLDzcKVeapWCdqlZ
@@ -748,7 +748,7 @@ python3 - "$work" "$root" <<'PY'
 import base64, hashlib, io, os, pathlib, sys, tarfile
 work, root = map(pathlib.Path, sys.argv[1:])
 data = base64.b64decode((work/'payload.b64').read_bytes())
-if hashlib.sha256(data).hexdigest() != '8307ac977d52fb8c857e4c8754472dca0932a172333cf7a1558d2335acbd36e0':
+if hashlib.sha256(data).hexdigest() != '604322aa1e3a07ec33d1a28dafe909d98e6b1b2ce42921270ea125dde15a56d3':
     raise SystemExit('菜单文件校验失败')
 with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
     for name in ['nodelite.py', 'runtime.py', 'protocols.py']:
