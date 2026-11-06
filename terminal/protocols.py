@@ -13,12 +13,12 @@ import uuid
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 PROTOCOLS = {
-    'vless': ('VLESS Reality（推荐，无需域名）', 'tcp'),
-    'trojan': ('Trojan TLS', 'tcp'),
-    'ss2022': ('Shadowsocks 2022', 'tcp'),
-    'vmess': ('VMess WebSocket', 'tcp'),
-    'hysteria2': ('Hysteria2（需要 UDP）', 'udp'),
-    'tuic': ('TUIC v5（需要 UDP）', 'udp'),
+    'vless': ('VLESS Reality（推荐首选，无需域名）【只需 TCP 映射 — 没有 UDP 时必选】', 'tcp'),
+    'trojan': ('Trojan TLS【只需 TCP 映射】', 'tcp'),
+    'ss2022': ('Shadowsocks 2022【只需 TCP 映射】', 'tcp'),
+    'vmess': ('VMess WebSocket（可配 Cloudflare 隧道救急）【只需 TCP 映射】', 'tcp'),
+    'hysteria2': ('Hysteria2【必须商家有 UDP 映射；没有 UDP 请勿选，先用 1】', 'udp'),
+    'tuic': ('TUIC v5【必须商家有 UDP 映射；没有 UDP 请勿选，先用 1】', 'udp'),
 }
 
 RESERVED_PORTS = {22}

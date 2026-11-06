@@ -77,10 +77,17 @@ def print_port_guide(kind='1', ssh_ports=None):
     print('  3. 节点内部端口  ：VPS 内 sing-box 监听端口（支持 443 或 1024–65535；NAT 填映射表同一行右边的内部端口）')
     print('  4. 在线订阅端口  ：公网自动更新订阅 URL 专用端口，必须与 SSH 端口、节点端口分开')
     if kind == '2':
-        print('\n【NAT 小鸡逐项填写示范】')
-        print('  假设商家后台端口映射表有两行：')
-        print('    第 1 行（SSH）：公网 23932 → 内部 22     （这是 SSH 登录，跳过不要动！）')
-        print('    第 2 行（空闲）：公网 53440 → 内部 10086  （选这行：“公网端口”填 53440，“内部端口”填 10086）')
+        print('\n【NAT 小鸡「商家后台端口映射表」傻瓜式对照表】')
+        print('  ┌────────────┬──────────┬────────────────┬────────────────┬────────────────────────────┐')
+        print('  │ 商家映射行 │ 映射类型 │ 左边：公网端口 │ 右边：内部端口 │ 用途说明（照着填）         │')
+        print('  ├────────────┼──────────┼────────────────┼────────────────┼────────────────────────────┤')
+        print('  │ 第 1 行    │ TCP      │ 如 23932       │ 22             │ ❌ SSH 登录专用，跳过别动！│')
+        print('  │ 第 2 行    │ TCP      │ 如 53440       │ 如 10086       │ ✅ 建 VLESS/VMess 节点     │')
+        print('  │ 第 3 行    │ TCP      │ 如 40187       │ 如 20000       │ ✅ 开启公网自动更新订阅    │')
+        print('  │ 第 4 行    │ UDP      │ 如 20381       │ 如 28443       │ ⚠️ 仅 Hysteria2 / TUIC 用  │')
+        print('  └────────────┴──────────┴────────────────┴────────────────┴────────────────────────────┘')
+        print('  💡 核心原则：如果商家后台没有 UDP 映射（或不确定有没有 UDP），请【先用 TCP】！')
+        print('     直接选 1（VLESS Reality，只需一条 TCP 映射），填那行 TCP 的“公网端口”和“内部端口”即可。')
 
 
 def prompt_nat_ssh_port(settings):
@@ -125,7 +132,7 @@ def creation_wizard():
             rt.write_json(rt.ROOT/'setup.json', dict(settings, host=host, network=kind))
 
     print('\n【第 2 步 / 共 3 步：填写连接协议与端口】')
-    print('选择协议；第一次建议直接回车选 1（VLESS Reality）：')
+    print('💡 提示：NAT 小鸡如果没有 UDP 映射（或不确定），请务必【先用 TCP】，直接回车选 1（VLESS Reality）：')
     keys = list(PROTOCOLS)
     for i, key in enumerate(keys, 1):
         print(f'  {i}. {PROTOCOLS[key][0]}')
@@ -134,8 +141,8 @@ def creation_wizard():
         raise ValueError('没有这个协议编号。')
     protocol = keys[choice-1]
     if PROTOCOLS[protocol][1] == 'udp':
-        if ask('商家明确允许 UDP，且 NAT 映射也是 UDP 吗？输入 yes 才继续', 'no') != 'yes':
-            raise ValueError('已取消。UDP 未确认时请选择 VLESS Reality。')
+        if ask('⚠️ 该协议需要 UDP！商家后台明确有 UDP 映射吗？（没有 UDP 请直接回车取消，改选 1 先用 TCP）输入 yes 才继续', 'no') != 'yes':
+            raise ValueError('已取消。没有 UDP 映射时请先选 1（VLESS Reality，只需 TCP）。')
     nodes = rt.load_state()['nodes']
     name = valid_name(ask('给节点取个名字', '我的节点-'+str(len(nodes)+1)))
     print_port_guide(kind)
@@ -230,9 +237,12 @@ def show_links():
     cf_domain = sub_cfg.get('cf_domain', '')
     for node in nodes:
         stages = rt.node_status_stages(node, core_active=core_active)
+        transport = PROTOCOLS[node['protocol']][1].upper()
         eff = dict(node, cf_domain=cf_domain, cf_ip=rt.CF_FAST_IPS[0][1]) if (node['protocol'] == 'vmess' and cf_domain and not node.get('cf_domain')) else node
         extra = f" | Cloudflare 香港优选直连：{eff.get('cf_ip')} (SNI: {cf_domain}:443)" if eff.get('cf_domain') else ''
-        print(f"\n【{node['name']}】（内部端口 {node['port']} → 公网 {node['host']}:{node['public_port']}{extra}）")
+        print(f"\n【{node['name']}】（映射类型：{transport} | 内部端口 {node['port']} → 公网 {node['host']}:{node['public_port']}{extra}）")
+        if node['port'] != node['public_port']:
+            print(f"📌 NAT 商家后台映射核对：【{transport} 映射】外部/公网端口 {node['public_port']} → 内部/内网端口 {node['port']}")
         print(f"状态：{stages['summary']}")
         print(uri(eff))
     if ext_nodes:

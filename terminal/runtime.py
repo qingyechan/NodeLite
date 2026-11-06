@@ -953,6 +953,7 @@ def sub_unit_text(init):
             'StartLimitBurst=3\n'
             '[Service]\n'
             'Type=simple\n'
+            'Environment=PYTHONMALLOC=malloc\n'
             'UMask=0077\n'
             f'ExecStart={exe} -B {script} serve-sub\n'
             'Restart=on-failure\n'
@@ -971,6 +972,7 @@ def sub_unit_text(init):
         'supervisor="supervise-daemon"\n'
         f'command="{exe}"\n'
         f'command_args="-B {script} serve-sub"\n'
+        'export PYTHONMALLOC=malloc\n'
         'umask 077\n'
         'respawn_delay=5\n'
         'respawn_max=3\n'
@@ -1517,11 +1519,11 @@ def _maintain_cf_tunnel(sub_root, listen_port):
         if not cfg.get('cf_tunnel') or not CLOUDFLARED.is_file():
             time.sleep(5)
             continue
-        env = dict(os.environ, GOMEMLIMIT='24MiB', GOGC='50')
+        env = dict(os.environ, GOMEMLIMIT='14MiB', GOGC='20')
         mode = cfg.get('cf_mode', 'quick')
         scheme = cfg.get('scheme', 'http')
         origin_url = f'{scheme}://127.0.0.1:{int(listen_port)}'
-        cmd = [str(CLOUDFLARED), 'tunnel', '--no-autoupdate', '--protocol', 'http2']
+        cmd = [str(CLOUDFLARED), 'tunnel', '--no-autoupdate', '--protocol', 'http2', '--ha-connections', '1']
         if scheme == 'https':
             cmd.append('--no-tls-verify')
         if mode == 'named' and cfg.get('cf_token'):
