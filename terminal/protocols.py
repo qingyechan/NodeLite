@@ -377,15 +377,11 @@ def clash_proxy(n):
 AIRPORT_DNS_CONFIG = {
     'enable': True,
     'ipv6': False,
-    'default-nameserver': ['223.5.5.5', '119.29.29.29', '114.114.114.114'],
+    'default-nameserver': ['223.5.5.5', '119.29.29.29'],
     'enhanced-mode': 'fake-ip',
     'fake-ip-range': '198.18.0.1/16',
     'use-hosts': True,
-    'respect-rules': True,
-    'proxy-server-nameserver': ['223.5.5.5', '119.29.29.29', '114.114.114.114'],
     'nameserver-policy': {
-        '+.cn': ['https://doh.pub/dns-query', 'https://dns.alidns.com/dns-query', '223.5.5.5'],
-        'geosite:cn,private': ['https://doh.pub/dns-query', 'https://dns.alidns.com/dns-query', '223.5.5.5'],
         '+.google.com': 'https://dns.cloudflare.com/dns-query',
         '+.googleapis.com': 'https://dns.cloudflare.com/dns-query',
         '+.googleapis.cn': 'https://dns.cloudflare.com/dns-query',
@@ -402,13 +398,12 @@ AIRPORT_DNS_CONFIG = {
         '+.chatgpt.com': 'https://dns.cloudflare.com/dns-query',
         '+.anthropic.com': 'https://dns.cloudflare.com/dns-query',
     },
+    'proxy-server-nameserver': ['223.5.5.5', '119.29.29.29'],
     'nameserver': [
         'https://doh.pub/dns-query',
         'https://dns.alidns.com/dns-query',
         'tls://dot.pub:853',
         'tls://dns.alidns.com:853',
-        '223.5.5.5',
-        '119.29.29.29',
     ],
     'fallback': [
         'https://dns.cloudflare.com/dns-query',
@@ -737,9 +732,6 @@ CHINA_DIRECT_RULES = (
     'IP-CIDR6,2001:67c:4e8::/48,节点选择,no-resolve',
     'IP-CIDR6,2001:b28:f23d::/48,节点选择,no-resolve',
     'IP-CIDR6,2001:b28:f23f::/48,节点选择,no-resolve',
-    'GEOSITE,private,DIRECT',
-    'GEOSITE,cn,DIRECT',
-    'GEOIP,LAN,DIRECT,no-resolve',
     'GEOIP,CN,DIRECT',
     'MATCH,节点选择',
 )

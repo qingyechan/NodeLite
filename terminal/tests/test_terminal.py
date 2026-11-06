@@ -644,9 +644,9 @@ class V030OptimizationTests(unittest.TestCase):
         self.assertIn('DOMAIN-SUFFIX,bilibili.com,DIRECT', rules)
         self.assertIn('DOMAIN-SUFFIX,taobao.com,DIRECT', rules)
         self.assertIn('DOMAIN-SUFFIX,qq.com,DIRECT', rules)
-        self.assertIn('GEOSITE,cn,DIRECT', rules)
         self.assertIn('GEOIP,CN,DIRECT', rules)
         self.assertNotIn('GEOIP,CN,DIRECT,no-resolve', rules)
+        self.assertNotIn('GEOIP,LAN,DIRECT,no-resolve', rules)
         self.assertEqual(rules[-1], 'MATCH,节点选择')
         group_names = [g['name'] for g in cfg['proxy-groups']]
         self.assertIn('节点选择', group_names)
