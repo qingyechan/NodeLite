@@ -60,14 +60,14 @@ NodeLite/
 │   ├── nodelite.run             # 独立自包含 Linux 安装包（由 terminal/build.py 生成）
 │   └── nodelite.run.sha256      # 安装包 SHA-256 校验值
 └── terminal/
-    ├── nodelite.py              # 中文交互菜单（14 项功能）与 CLI 入口
-    ├── protocols.py             # 六协议配置、分享链接、FlClash YAML 与订阅快照打包
-    ├── runtime.py               # 事务提交回滚、协议自测、轻量订阅与转发服务、核心升级、旧服务清理、网络诊断
+    ├── nodelite.py              # 中文交互菜单（16 项功能）与 CLI 入口
+    ├── protocols.py             # 六协议配置、分享链接、机场分流规则、FlClash YAML 与订阅快照打包
+    ├── runtime.py               # 事务提交回滚、协议自测、轻量订阅与转发服务、核心升级、GitHub 在线自更新、网络诊断
     ├── install.sh               # Linux 安装脚本模板
     ├── build.py                 # 打包生成 dist/nodelite.run
     ├── README.md                # 详细端口规则、可靠性设计与架构说明
     └── tests/
-        ├── test_terminal.py     # 26 项单元与事务集成测试
+        ├── test_terminal.py     # 30 项单元与事务集成测试
         └── live_protocols.py    # Linux 回环真机六协议隔离实测与持续负载压测
 ```
 

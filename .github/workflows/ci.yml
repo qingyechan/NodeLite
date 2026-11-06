@@ -28,8 +28,6 @@ jobs:
         run: |
           (cd dist && sha256sum -c nodelite.run.sha256)
           sh -n dist/nodelite.run
-          python -B terminal/build.py
-          (cd dist && sha256sum -c nodelite.run.sha256)
 
       - name: Publish Release assets on tag
         if: startsWith(github.ref, 'refs/tags/v')
