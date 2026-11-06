@@ -1772,8 +1772,6 @@ def self_update_from_github(installer_url=None, sha256_url=None, installer_path=
             if (ROOT/'sub'/'config.json').exists():
                 with contextlib.suppress(Exception):
                     sync_subscription(manage_service=True)
-                    if service_name('status', check=False, name=SUB_SERVICE):
-                        service_name('restart', check=False, name=SUB_SERVICE)
 
             return {
                 'updated': True,
