@@ -182,8 +182,8 @@ def create(node):
         nodes = rt.load_state()['nodes']
         if len(nodes) >= 24:
             raise ValueError('轻量版最多管理 24 个监听节点；小内存 VPS 建议只创建 1–3 个。')
-        if rt.memory_info().get('MemAvailable', 100) < 48:
-            raise RuntimeError('当前可用内存不足 48 MiB，创建时的临时自测进程可能导致内存不足。请先关闭不需要的面板/程序，再重试。')
+        if rt.memory_info().get('MemAvailable', 100) < 20:
+            raise RuntimeError('当前可用内存不足 20 MiB，创建时的临时自测进程可能导致内存不足。请先关闭不需要的面板/程序，再重试。')
         rt.check_ports(nodes+[node], nodes)
         try:
             rt.prepare_credentials(node)

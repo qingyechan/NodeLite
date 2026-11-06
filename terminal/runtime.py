@@ -282,8 +282,9 @@ def self_test(node, local=True, target=None):
         path = Path(d)/'client.json'
         write_json(path, cfg)
         with (Path(d)/'core.log').open('w+', encoding='utf-8') as log:
+            probe_env = dict(core_env(), GOMEMLIMIT='16MiB', GOGC='20')
             child = subprocess.Popen([str(CORE), 'run', '-c', str(path)], stdout=log, stderr=log,
-                                     env=core_env())
+                                     env=probe_env)
             try:
                 for _ in range(50):
                     if child.poll() is not None:
@@ -1616,6 +1617,9 @@ def serve_subscription_forever(sub_root=None):
                 _CF_PROC[0].terminate()
         raise SystemExit(0)
 
+    import gc
+    with contextlib.suppress(ValueError, RuntimeError):
+        threading.stack_size(131072)
     for sig in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(Exception):
             signal.signal(sig, _shutdown)
@@ -1623,6 +1627,7 @@ def serve_subscription_forever(sub_root=None):
     sroot = Path(sub_root or (ROOT/'sub'))
     t = threading.Thread(target=_maintain_cf_tunnel, args=(sroot, server.server_port), daemon=True)
     t.start()
+    gc.collect()
     server.serve_forever()
 
 
