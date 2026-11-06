@@ -24,7 +24,7 @@ from protocols import (
     valid_sub_host,
 )
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 
 
 def ask(label, default=''):
@@ -148,7 +148,13 @@ def creation_wizard():
         public = port
     sni = 'www.microsoft.com'
     if protocol == 'vless':
-        sni = valid_sni(ask('Reality 握手域名（通常直接回车）', sni))
+        print('正在并发测速挑选离当前 VPS 机房延迟最低的 Reality 伪装域名（SNI）……')
+        sni_probe = rt.probe_reality_sni_candidates()
+        sni = sni_probe['best']
+        ok_snis = [f"{r['sni']} ({r['latency_ms']}ms)" for r in sni_probe['results'] if r.get('ok')][:3]
+        if ok_snis:
+            print('  测速优选结果：' + ' | '.join(ok_snis))
+        sni = valid_sni(ask('Reality 握手域名（已自动填入最快域名，直接回车即可）', sni))
     node = new_node(protocol, name, host, port, public, sni)
     if protocol in ('trojan', 'hysteria2', 'tuic'):
         print('此协议需要证书。没有域名时可用自签证书，但客户端会跳过证书验证。')
@@ -213,7 +219,10 @@ def create(node):
 
 def show_links():
     nodes = rt.load_state()['nodes']
-    if not nodes:
+    ext_cfg = rt.load_external_config()
+    ext_nodes = ext_cfg.get('external_nodes') or []
+    relay_chains = ext_cfg.get('relay_chains') or []
+    if not nodes and not ext_nodes:
         print('尚无节点；选择“创建节点”。')
         return
     core_active = rt.service('status', check=False)
@@ -226,11 +235,20 @@ def show_links():
         print(f"\n【{node['name']}】（内部端口 {node['port']} → 公网 {node['host']}:{node['public_port']}{extra}）")
         print(f"状态：{stages['summary']}")
         print(uri(eff))
+    if ext_nodes:
+        print('\n【已聚合的其他 VPS 外部节点】')
+        for ext in ext_nodes:
+            print(f"  - {ext['name']} ({ext['protocol']} | {ext['host']}:{ext['public_port']})")
+            print('    ' + uri(ext))
+    if relay_chains:
+        print('\n【已配置的链式落地代理 (dialer-proxy)】')
+        for chain in relay_chains:
+            print(f"  - {chain['name']}：前置入口 [{chain['front']}] → 落地节点 [{chain['exit']}]")
     if sub_cfg.get('enabled'):
         urls = subscription_urls(sub_cfg)
         cf_mode = sub_cfg.get('cf_mode', '')
         cf_tag = '永久固定域名' if cf_mode in ('named', 'cdn') else '临时隧道(重启会变)'
-        print('\n【在线自动更新订阅 URL（已与当前节点同步）】')
+        print('\n【在线自动更新订阅 URL（已内置国内直连分流 + 多机节点聚合）】')
         if urls.get('cf_flclash'):
             print(f'  ★ Cloudflare HTTPS 订阅 ({cf_tag}) FlClash：'+urls['cf_flclash'])
             print(f'  ★ Cloudflare HTTPS 订阅 ({cf_tag}) Base64 ：'+urls['cf_links'])
@@ -239,19 +257,19 @@ def show_links():
 
 
 def exports():
-    nodes = rt.load_state()['nodes']
-    if not nodes:
+    eff_nodes, relay_chains = rt.effective_subscription_nodes()
+    if not eff_nodes:
         raise ValueError('没有可导出的节点。')
     directory = rt.ROOT/'exports'
     directory.mkdir(mode=0o700, exist_ok=True)
-    links = '\n'.join(uri(n) for n in nodes)+'\n'
+    links = '\n'.join(uri(n) for n in eff_nodes)+'\n'
     for name, data in [('links.txt', links), ('subscription.txt', base64.b64encode(links.encode()).decode()),
-                       ('flclash.yaml', json.dumps(clash_config(nodes), ensure_ascii=False, indent=2))]:
+                       ('flclash.yaml', json.dumps(clash_config(eff_nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2))]:
         path = directory/name
         path.write_text(data, encoding='utf-8')
         path.chmod(0o600)
         print(str(path))
-    print('用 SSH 软件的文件面板下载：FlClash 导入 flclash.yaml；通用客户端导入 links.txt。')
+    print('用 SSH 软件的文件面板下载：FlClash 导入 flclash.yaml（已内置国内直连分流与多机/链式节点）；通用客户端导入 links.txt。')
     sub_cfg = rt.load_sub_config()
     if sub_cfg.get('enabled'):
         urls = subscription_urls(sub_cfg)
@@ -457,6 +475,94 @@ def rollback_menu():
     print(f'已恢复上一版配置（共 {len(restored)} 个节点），并已同步在线订阅。')
 
 
+def external_nodes_menu():
+    ext_cfg = rt.load_external_config()
+    ext_nodes = ext_cfg.get('external_nodes') or []
+    chains = ext_cfg.get('relay_chains') or []
+    print('\n【多台 VPS 聚合进同一个订阅 URL + 链式落地 (dialer-proxy)】')
+    if ext_nodes:
+        print('已添加的其他 VPS 外部节点：')
+        for idx, n in enumerate(ext_nodes, 1):
+            print(f"  {idx}. {n['name']} | {n['protocol']} | {n['host']}:{n['public_port']}")
+    else:
+        print('当前尚未添加其他 VPS 的外部节点。')
+    if chains:
+        print('已配置的链式落地代理 (dialer-proxy)：')
+        for idx, c in enumerate(chains, 1):
+            print(f"  {idx}. {c['name']}：前置入口 [{c['front']}] → 落地节点 [{c['exit']}]")
+
+    print('\n  1. 粘贴添加另一台 VPS 的单节点链接（合并到当前订阅 URL）\n'
+          '  2. 创建「前置入口节点 → 落地节点」链式代理（dialer-proxy）\n'
+          '  3. 删除一个已添加的外部节点\n'
+          '  4. 删除一条链式落地代理\n'
+          '  0. 返回主菜单')
+    choice = ask('选择操作', '1' if not ext_nodes else '0')
+    if choice == '0':
+        return
+    if choice == '1':
+        raw = ask('粘贴另一台 VPS 的单节点分享链接 (vless/vmess/hysteria2/hy2/tuic/trojan/ss)')
+        cname = ask('自定义显示名称（直接回车则使用链接自带名称）', '')
+        added = rt.add_external_node(raw, custom_name=cname)
+        clear_exports()
+        print(f"已聚合外部节点：{added['name']} ({added['protocol']} | {added['host']}:{added['public_port']})，在线订阅已自动同步！")
+        return
+    if choice == '2':
+        all_nodes, _ = rt.effective_subscription_nodes(ext_cfg=ext_cfg)
+        if len(all_nodes) < 2:
+            raise ValueError('至少需要 2 个可用节点（本机节点 + 外部节点）才能创建链式落地代理。')
+        print('\n当前可用节点列表：')
+        for idx, n in enumerate(all_nodes, 1):
+            tag = '外部VPS' if n.get('external') else '本机VPS'
+            print(f"  {idx}. [{tag}] {n['name']} ({n['protocol']} | {n['host']}:{n['public_port']})")
+        f_idx = int(ask('选择【前置入口节点】编号（国内直连速度快的机器）', '1'))
+        e_idx = int(ask('选择【落地目标节点】编号（解锁/最终出口机器）', '2'))
+        if not (1 <= f_idx <= len(all_nodes) and 1 <= e_idx <= len(all_nodes)):
+            raise ValueError('节点编号超出范围。')
+        front_name = all_nodes[f_idx - 1]['name']
+        exit_name = all_nodes[e_idx - 1]['name']
+        default_cname = f'🔗 链式：{front_name} → {exit_name}'
+        cname = valid_name(ask('给这条链式落地节点取个名字', default_cname))
+        chain = rt.add_relay_chain(front_name, exit_name, chain_name=cname)
+        clear_exports()
+        print(f"已创建链式落地节点：{chain['name']}（入口 {chain['front']} → 落地 {chain['exit']}），FlClash 刷新订阅即可使用！")
+        return
+    if choice == '3':
+        if not ext_nodes:
+            raise ValueError('当前没有可删除的外部节点。')
+        for idx, n in enumerate(ext_nodes, 1):
+            print(f"  {idx}. {n['name']} ({n['protocol']} | {n['host']}:{n['public_port']})")
+        idx = int(ask('选择要删除的外部节点编号', '1'))
+        if not 1 <= idx <= len(ext_nodes):
+            raise ValueError('编号超出范围。')
+        removed = rt.remove_external_node(ext_nodes[idx - 1]['id'])
+        clear_exports()
+        print(f"已移除外部节点：{removed['name']}，在线订阅已自动同步。")
+        return
+    if choice == '4':
+        if not chains:
+            raise ValueError('当前没有可删除的链式代理。')
+        for idx, c in enumerate(chains, 1):
+            print(f"  {idx}. {c['name']} ({c['front']} → {c['exit']})")
+        idx = int(ask('选择要删除的链式代理编号', '1'))
+        if not 1 <= idx <= len(chains):
+            raise ValueError('编号超出范围。')
+        removed = rt.remove_relay_chain(chains[idx - 1]['id'])
+        clear_exports()
+        print(f"已移除链式代理：{removed['name']}，在线订阅已自动同步。")
+        return
+    raise ValueError('请输入 0–4。')
+
+
+def self_update_menu():
+    print(f'\n当前 NodeLite 版本：{VERSION}')
+    print('将从 GitHub 官方仓库 (qingyechan/NodeLite) 拉取最新 nodelite.run 与 .sha256 校验文件，校验通过后热更新脚本（不中断正在运行的节点）。')
+    if ask('立即从 GitHub 检查并更新 NodeLite？(yes/no)', 'yes') != 'yes':
+        return
+    res = rt.self_update_from_github()
+    print(f"更新完成：{res['previousVersion'] or VERSION} → {res['currentVersion']} (SHA-256: {res['sha256'][:16]}…)")
+    print('重新运行 nl 即可使用新版本菜单。')
+
+
 def doctor():
     diag = rt.diagnose_network(run_public_loop=True)
     sys_info = diag['system']
@@ -604,9 +710,9 @@ def uninstall():
 def menu():
     while True:
         print('\nNodeLite（轻节点） '+VERSION+' | 输入 nl 或 NL 随时打开\n'
-              '  1. 创建节点（三步引导：检测 → 填端口 → 自测出链）\n'
-              '  2. 查看 / 复制分享链接与订阅地址（含验证状态）\n'
-              '  3. 导出 FlClash / 通用配置文件\n'
+              '  1. 创建节点（三步引导：检测 → 填端口 → 自动优选最快 SNI 并自测出链）\n'
+              '  2. 查看 / 复制分享链接与订阅地址（含多机聚合与验证状态）\n'
+              '  3. 导出 FlClash / 通用配置文件（内置国内直连智能分流）\n'
               '  4. 开启 / 管理公网自动更新订阅 URL（支持固定隧道/自有域名）\n'
               '  5. 自测节点能否代理访问网站\n'
               '  6. 查看状态 / 内存明细 / 证书到期 / 排查连接问题\n'
@@ -618,6 +724,8 @@ def menu():
               '  12. 恢复上一版节点配置（回滚）\n'
               '  13. 重启 NodeLite 服务\n'
               '  14. 卸载 NodeLite 服务（保留备份）\n'
+              '  15. 添加 / 管理其他 VPS 外部节点与链式落地（dialer-proxy 多机聚合）\n'
+              '  16. 从 GitHub 一键在线更新 NodeLite（nl update，不中断节点）\n'
               '  0. 退出（节点继续运行，菜单不再占内存）')
         value = ask('输入数字', '0')
         if value == '0':
@@ -637,6 +745,8 @@ def menu():
             '12': rollback_menu,
             '13': restart,
             '14': uninstall,
+            '15': external_nodes_menu,
+            '16': self_update_menu,
         }
         try:
             if value not in actions:
@@ -651,14 +761,18 @@ def main():
     parser = argparse.ArgumentParser(prog='nl', description='NodeLite（轻节点）中文终端节点管理；输入 nl 或 NL 打开菜单')
     parser.add_argument('action', nargs='?', default='menu',
                         choices=['menu', 'links', 'export', 'doctor', 'test', 'restart', 'add',
-                                 'port', 'sub', 'upgrade-core', 'legacy', 'rollback'])
+                                 'port', 'sub', 'upgrade-core', 'legacy', 'rollback', 'external', 'update'])
     parser.add_argument('--protocol', choices=PROTOCOLS, default='vless')
     parser.add_argument('--host')
     parser.add_argument('--port', type=int)
     parser.add_argument('--public-port', type=int)
-    parser.add_argument('--name', default='我的节点')
+    parser.add_argument('--name', default='')
     parser.add_argument('--node')
-    parser.add_argument('--sni', default='www.microsoft.com')
+    parser.add_argument('--sni', default='')
+    parser.add_argument('--uri', default='')
+    parser.add_argument('--front', default='')
+    parser.add_argument('--exit', dest='exit_node', default='')
+    parser.add_argument('--remove', default='')
     parser.add_argument('--scheme', choices=['http', 'https'], default='http')
     parser.add_argument('--cert', default='')
     parser.add_argument('--key', default='')
@@ -687,7 +801,8 @@ def main():
             parser.error('UDP 协议需要 --udp-confirmed 确认公网 UDP 可达')
         if args.protocol in ('trojan', 'hysteria2', 'tuic') and not args.accept_self_signed:
             parser.error('无域名证书时需要 --accept-self-signed；也可用交互菜单选择自己的证书')
-        create(new_node(args.protocol, args.name, args.host, args.port, args.public_port, args.sni))
+        chosen_sni = args.sni or (rt.probe_reality_sni_candidates()['best'] if args.protocol == 'vless' else 'www.microsoft.com')
+        create(new_node(args.protocol, args.name or '我的节点', args.host, args.port, args.public_port, chosen_sni))
     elif args.action == 'port':
         if not args.node or not args.port:
             parser.error('port 需要 --node 节点ID或名称 --port 新内部端口 [--public-port 新公网端口]')
@@ -723,6 +838,24 @@ def main():
                 self_signed=args.accept_self_signed, title=args.title, token=args.token,
             )
             print(json.dumps(res['urls'], ensure_ascii=False, indent=2))
+    elif args.action == 'external':
+        if args.remove:
+            try:
+                res = rt.remove_external_node(args.remove)
+            except ValueError:
+                res = rt.remove_relay_chain(args.remove)
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        elif args.uri:
+            res = rt.add_external_node(args.uri, custom_name=args.name)
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        elif args.front and args.exit_node:
+            res = rt.add_relay_chain(args.front, args.exit_node, chain_name=args.name)
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(rt.load_external_config(), ensure_ascii=False, indent=2))
+    elif args.action == 'update':
+        res = rt.self_update_from_github(installer_path=args.archive, sha256_text=args.sha256)
+        print(json.dumps(res, ensure_ascii=False, indent=2))
     elif args.action == 'upgrade-core':
         res = rt.upgrade_core(version=args.version or rt.CORE_VERSION, sha256=args.sha256, archive_path=args.archive)
         print(json.dumps(res, ensure_ascii=False, indent=2))

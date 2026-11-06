@@ -630,6 +630,149 @@ class PortTests(unittest.TestCase):
                 rt.check_ports([sub_collision], [])
 
 
+class V030OptimizationTests(unittest.TestCase):
+    def test_china_direct_routing_rules_in_clash_config(self):
+        vless = p.new_node('vless', '日本直连', '203.0.113.10', 10086, 53440, public_key='pub_k')
+        cfg = p.clash_config([vless])
+        rules = cfg['rules']
+        self.assertIn('DOMAIN-SUFFIX,cn,DIRECT', rules)
+        self.assertIn('DOMAIN-SUFFIX,bilibili.com,DIRECT', rules)
+        self.assertIn('DOMAIN-SUFFIX,taobao.com,DIRECT', rules)
+        self.assertIn('DOMAIN-SUFFIX,qq.com,DIRECT', rules)
+        self.assertIn('GEOIP,LAN,DIRECT,no-resolve', rules)
+        self.assertIn('GEOIP,CN,DIRECT,no-resolve', rules)
+        self.assertEqual(rules[-1], 'MATCH,节点选择')
+        group_names = [g['name'] for g in cfg['proxy-groups']]
+        self.assertIn('节点选择', group_names)
+        self.assertIn('国内直连', group_names)
+
+    def test_external_node_aggregation_and_dialer_proxy_relay_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)/'nodelite'
+            with patch.object(rt, 'ROOT', root), \
+                 patch.object(rt, 'CORE', Path(tmp)/'sing-box'), \
+                 patch.object(rt, 'checked', return_value=''), \
+                 patch.object(rt, 'service', return_value=True), \
+                 patch.object(rt, 'service_enabled', return_value=True), \
+                 patch.object(rt, 'enable_service'), \
+                 patch.object(rt, 'service_name', return_value=True), \
+                 patch.object(rt, 'enable_service_name'), \
+                 patch.object(rt, 'install_sub_unit'):
+                jp_node = p.new_node('vless', '日本入口', '104.251.231.39', rt.free_tcp_port(), 53440, public_key='jp_pbk', private_key='jp_priv')
+                rt.commit([jp_node])
+                sub_cfg = rt.configure_subscription('104.251.231.39', rt.free_tcp_port(), 40187, start_daemon=False)
+
+                # Generate external node URIs from a second VPS (US) across protocols
+                us_vless_orig = p.new_node('vless', '美西VLESS落地', '38.49.55.238', 10086, 37460, public_key='us_pbk')
+                us_hy2_orig = p.new_node('hysteria2', '美西HY2落地', '38.49.55.238', 28443, 20381)
+                us_vmess_orig = p.new_node('vmess', '美西VMess', '38.49.55.238', 23457, 20381)
+
+                ext1 = rt.add_external_node(p.uri(us_vless_orig))
+                ext2 = rt.add_external_node(p.uri(us_hy2_orig))
+                ext3 = rt.add_external_node(p.uri(us_vmess_orig))
+                self.assertEqual(ext1['name'], '美西VLESS落地')
+                self.assertEqual(ext2['protocol'], 'hysteria2')
+                self.assertEqual(ext3['protocol'], 'vmess')
+
+                # Add a dialer-proxy relay chain: 日本入口 -> 美西VLESS落地
+                chain = rt.add_relay_chain('日本入口', '美西VLESS落地', chain_name='🔗 日本中转美西')
+                self.assertEqual(chain['front'], '日本入口')
+                self.assertEqual(chain['exit'], '美西VLESS落地')
+
+                # Verify the synchronized subscription YAML includes local, external, and dialer-proxy relay nodes
+                yaml_data = json.loads((root/'sub'/'current'/'clash.yaml').read_text(encoding='utf-8'))
+                proxies_by_name = {px['name']: px for px in yaml_data['proxies']}
+                self.assertIn('日本入口', proxies_by_name)
+                self.assertIn('美西VLESS落地', proxies_by_name)
+                self.assertIn('美西HY2落地', proxies_by_name)
+                self.assertIn('美西VMess', proxies_by_name)
+                self.assertIn('🔗 日本中转美西', proxies_by_name)
+                relay_px = proxies_by_name['🔗 日本中转美西']
+                self.assertEqual(relay_px['dialer-proxy'], '日本入口')
+                self.assertEqual(relay_px['server'], '38.49.55.238')
+                self.assertEqual(relay_px['port'], 37460)
+
+                # Removing external node also cleans up dependent relay chain
+                rt.remove_external_node('美西VLESS落地')
+                yaml_after = json.loads((root/'sub'/'current'/'clash.yaml').read_text(encoding='utf-8'))
+                names_after = {px['name'] for px in yaml_after['proxies']}
+                self.assertNotIn('美西VLESS落地', names_after)
+                self.assertNotIn('🔗 日本中转美西', names_after)
+
+    def test_reality_sni_auto_probe_picks_fastest_tls13_domain(self):
+        fake_latencies = {
+            'www.microsoft.com': {'sni': 'www.microsoft.com', 'ok': True, 'latency_ms': 38.5, 'tls': 'TLSv1.3'},
+            'www.apple.com': {'sni': 'www.apple.com', 'ok': True, 'latency_ms': 1.4, 'tls': 'TLSv1.3'},
+            'gateway.icloud.com': {'sni': 'gateway.icloud.com', 'ok': True, 'latency_ms': 2.1, 'tls': 'TLSv1.3'},
+            'www.amd.com': {'sni': 'www.amd.com', 'ok': False, 'reason': 'timeout'},
+        }
+        res = rt.probe_reality_sni_candidates(
+            candidates=list(fake_latencies.keys()),
+            probe_fn=lambda d: fake_latencies[d],
+        )
+        self.assertEqual(res['best'], 'www.apple.com')
+        self.assertEqual(res['bestLatencyMs'], 1.4)
+
+        # Fallback when all probes fail
+        fallback = rt.probe_reality_sni_candidates(
+            candidates=['www.apple.com'],
+            probe_fn=lambda d: {'sni': d, 'ok': False, 'reason': 'offline'},
+        )
+        self.assertEqual(fallback['best'], 'www.microsoft.com')
+
+    def test_github_self_update_verifies_sha256_and_hot_updates_scripts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            opt_dir = base/'opt'
+            opt_dir.mkdir()
+            (opt_dir/'nodelite.py').write_text("VERSION = '0.2.0'\n", encoding='utf-8')
+            (opt_dir/'runtime.py').write_text("# old runtime\n", encoding='utf-8')
+            (opt_dir/'protocols.py').write_text("# old protocols\n", encoding='utf-8')
+
+            # Build a fake installer bundle with VERSION = '0.3.0'
+            import io, tarfile, gzip
+            buf = io.BytesIO()
+            with gzip.GzipFile(filename='', mode='wb', fileobj=buf, mtime=0) as gz:
+                with tarfile.open(fileobj=gz, mode='w') as tf:
+                    for fname, content in [
+                        ('nodelite.py', b"VERSION = '0.3.0'\n"),
+                        ('runtime.py', b"# new runtime 0.3.0\n"),
+                        ('protocols.py', b"# new protocols 0.3.0\n"),
+                    ]:
+                        info = tarfile.TarInfo(fname)
+                        info.size = len(content)
+                        tf.addfile(info, io.BytesIO(content))
+            b64_payload = base64.b64encode(buf.getvalue()).decode('ascii')
+            installer_file = base/'nodelite.run'
+            installer_file.write_text(
+                f"#!/bin/sh\nbase64 -d <<'PAYLOAD' | tar -xzf - -C \"$target\"\n{b64_payload}\nPAYLOAD\n",
+                encoding='utf-8',
+            )
+            good_hash = hashlib.sha256(installer_file.read_bytes()).hexdigest()
+
+            with patch.object(rt, 'ROOT', base/'etc'):
+                # 1. Mismatched SHA-256 must abort without overwriting existing files
+                with self.assertRaisesRegex(RuntimeError, 'SHA-256 校验不一致'):
+                    rt.self_update_from_github(
+                        installer_path=installer_file,
+                        sha256_text='0'*64 + '  nodelite.run\n',
+                        install_dir=opt_dir,
+                    )
+                self.assertIn('0.2.0', (opt_dir/'nodelite.py').read_text(encoding='utf-8'))
+
+                # 2. Matching SHA-256 atomically updates scripts and keeps .bak backups
+                res = rt.self_update_from_github(
+                    installer_path=installer_file,
+                    sha256_text=f'{good_hash}  nodelite.run\n',
+                    install_dir=opt_dir,
+                )
+                self.assertTrue(res['updated'])
+                self.assertEqual(res['previousVersion'], '0.2.0')
+                self.assertEqual(res['currentVersion'], '0.3.0')
+                self.assertIn('0.3.0', (opt_dir/'nodelite.py').read_text(encoding='utf-8'))
+                self.assertTrue((opt_dir/'nodelite.py.bak').is_file())
+
+
 if __name__ == '__main__':
     unittest.main()
 

@@ -28,10 +28,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from protocols import (
     PROTOCOLS,
     TOKEN_RE,
+    build_relay_proxies,
     inbound,
     new_node,
     new_token,
     outbound,
+    parse_node_uri,
     server_config,
     subscription_bundle,
     subscription_urls,
@@ -710,17 +712,98 @@ CF_FAST_IPS = [
     ('香港极速5', '104.19.150.1'),
 ]
 
+REALITY_SNI_CANDIDATES = (
+    'www.apple.com',
+    'gateway.icloud.com',
+    'www.microsoft.com',
+    'www.amd.com',
+    'swdist.apple.com',
+    'dl.google.com',
+)
 
-def sync_subscription(nodes=None, manage_service=True):
-    """Atomically write the verified node snapshot for the public subscription server."""
+
+def _probe_single_sni(domain, timeout=1.5):
+    start = time.monotonic()
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((domain, 443), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
+                ver = ssock.version() or ''
+        ms = round((time.monotonic() - start) * 1000, 1)
+        if ver not in ('TLSv1.3', 'TLSv1.2'):
+            return {'sni': domain, 'ok': False, 'reason': f'unsupported TLS ({ver})'}
+        return {'sni': domain, 'ok': True, 'latency_ms': ms, 'tls': ver}
+    except Exception as err:
+        return {'sni': domain, 'ok': False, 'reason': str(err)}
+
+
+def probe_reality_sni_candidates(candidates=None, timeout=1.5, probe_fn=None):
+    """Concurrently test candidate Reality SNI domains from the VPS and pick the lowest-latency TLS 1.3 host."""
+    domains = list(candidates or REALITY_SNI_CANDIDATES)
+    fn = probe_fn or (lambda d: _probe_single_sni(d, timeout=timeout))
+    results = []
+    lock_obj = threading.Lock()
+
+    def _worker(d):
+        res = fn(d)
+        with lock_obj:
+            results.append(res)
+
+    threads = [threading.Thread(target=_worker, args=(d,), daemon=True) for d in domains]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=timeout + 0.5)
+
+    ok_list = [r for r in results if r.get('ok')]
+    ok_list.sort(key=lambda r: (0 if r.get('tls') == 'TLSv1.3' else 1, r.get('latency_ms', 9999)))
+    failed_list = [r for r in results if not r.get('ok')]
+    best = ok_list[0]['sni'] if ok_list else 'www.microsoft.com'
+    return {
+        'best': best,
+        'bestLatencyMs': ok_list[0]['latency_ms'] if ok_list else None,
+        'results': ok_list + failed_list,
+    }
+
+
+def load_external_config():
+    path = ROOT/'sub'/'external.json'
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding='utf-8'))
+            return {
+                'external_nodes': list(data.get('external_nodes') or []),
+                'relay_chains': list(data.get('relay_chains') or []),
+            }
+    except (OSError, ValueError):
+        pass
+    return {'external_nodes': [], 'relay_chains': []}
+
+
+def save_external_config(data, sync=True):
     sub_root = ROOT/'sub'
-    cfg = load_sub_config()
-    if not cfg or not cfg.get('token'):
-        return None
+    sub_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = {
+        'schema': 1,
+        'external_nodes': list(data.get('external_nodes') or []),
+        'relay_chains': list(data.get('relay_chains') or []),
+    }
+    write_json(sub_root/'external.json', payload)
+    if sync and (sub_root/'config.json').exists():
+        sync_subscription(manage_service=True)
+    return payload
+
+
+def effective_subscription_nodes(nodes=None, sub_cfg=None, ext_cfg=None):
+    """Combine local VPS nodes, Cloudflare fast IP variants, external VPS nodes, and relay chains."""
     if nodes is None:
         nodes = load_state()['nodes']
-    cf_domain = cfg.get('cf_domain', '')
-    cf_ips = cfg.get('cf_ips') or CF_FAST_IPS
+    if sub_cfg is None:
+        sub_cfg = load_sub_config()
+    if ext_cfg is None:
+        ext_cfg = load_external_config()
+    cf_domain = (sub_cfg or {}).get('cf_domain', '')
+    cf_ips = (sub_cfg or {}).get('cf_ips') or CF_FAST_IPS
     native_nodes = []
     cf_nodes = []
     for n in nodes:
@@ -731,11 +814,94 @@ def sync_subscription(nodes=None, manage_service=True):
             cf_nodes.append(dict(n, name=n['name']+'-默认域名', cf_domain=cf_domain, cf_ip=cf_domain))
         else:
             native_nodes.append(n)
-    effective_nodes = native_nodes + cf_nodes
+    ext_nodes = list(ext_cfg.get('external_nodes') or [])
+    relay_chains = list(ext_cfg.get('relay_chains') or [])
+    return native_nodes + ext_nodes + cf_nodes, relay_chains
+
+
+def add_external_node(raw_uri, custom_name=''):
+    """Parse and add an external VPS node URI into the aggregated subscription."""
+    with lock():
+        node = parse_node_uri(raw_uri, custom_name=custom_name or None)
+        ext_cfg = load_external_config()
+        local_names = {n['name'] for n in load_state()['nodes']}
+        ext_names = {n['name'] for n in ext_cfg['external_nodes']}
+        if node['name'] in local_names or node['name'] in ext_names:
+            raise ValueError(f"节点名称 {node['name']} 已存在，请指定一个不同的名称。")
+        ext_cfg['external_nodes'].append(node)
+        save_external_config(ext_cfg, sync=True)
+        return node
+
+
+def remove_external_node(node_id_or_name):
+    with lock():
+        ext_cfg = load_external_config()
+        target = next((n for n in ext_cfg['external_nodes'] if n['id'] == node_id_or_name or n['name'] == node_id_or_name), None)
+        if not target:
+            raise ValueError('未找到指定的外部节点。')
+        ext_cfg['external_nodes'] = [n for n in ext_cfg['external_nodes'] if n['id'] != target['id']]
+        ext_cfg['relay_chains'] = [
+            c for c in ext_cfg['relay_chains']
+            if c.get('front') != target['name'] and c.get('exit') != target['name']
+        ]
+        save_external_config(ext_cfg, sync=True)
+        return target
+
+
+def add_relay_chain(front_name, exit_name, chain_name=''):
+    """Create a `dialer-proxy` relay chain (front entry node -> exit landing node) in the subscription."""
+    with lock():
+        front_name = valid_name(front_name)
+        exit_name = valid_name(exit_name)
+        if front_name == exit_name:
+            raise ValueError('前置入口节点与落地节点不能是同一个节点。')
+        ext_cfg = load_external_config()
+        all_nodes, _ = effective_subscription_nodes(ext_cfg=ext_cfg)
+        available_names = {n['name'] for n in all_nodes}
+        if front_name not in available_names:
+            raise ValueError(f'未找到前置入口节点：{front_name}')
+        if exit_name not in available_names:
+            raise ValueError(f'未找到落地节点：{exit_name}')
+        resolved_name = valid_name(chain_name or f'🔗 链式：{front_name} → {exit_name}')
+        existing_chain_names = {c.get('name') for c in ext_cfg['relay_chains']}
+        if resolved_name in available_names or resolved_name in existing_chain_names:
+            raise ValueError(f'链式节点名称 {resolved_name} 已存在。')
+        chain = {
+            'id': 'chain-' + secrets.token_hex(5),
+            'name': resolved_name,
+            'front': front_name,
+            'exit': exit_name,
+        }
+        ext_cfg['relay_chains'].append(chain)
+        save_external_config(ext_cfg, sync=True)
+        return chain
+
+
+def remove_relay_chain(chain_id_or_name):
+    with lock():
+        ext_cfg = load_external_config()
+        target = next((c for c in ext_cfg['relay_chains'] if c.get('id') == chain_id_or_name or c.get('name') == chain_id_or_name), None)
+        if not target:
+            raise ValueError('未找到指定的链式代理。')
+        ext_cfg['relay_chains'] = [c for c in ext_cfg['relay_chains'] if c.get('id') != target['id']]
+        save_external_config(ext_cfg, sync=True)
+        return target
+
+
+def sync_subscription(nodes=None, manage_service=True):
+    """Atomically write the verified node snapshot for the public subscription server."""
+    sub_root = ROOT/'sub'
+    cfg = load_sub_config()
+    if not cfg or not cfg.get('token'):
+        return None
+    if nodes is None:
+        nodes = load_state()['nodes']
+    effective_nodes, relay_chains = effective_subscription_nodes(nodes=nodes, sub_cfg=cfg)
     bundle = subscription_bundle(
         effective_nodes,
         title=cfg.get('title', 'NodeLite'),
         userinfo=cfg.get('userinfo') or _billing_userinfo(),
+        relay_chains=relay_chains,
     )
     releases = sub_root/'releases'
     releases.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -761,7 +927,7 @@ def sync_subscription(nodes=None, manage_service=True):
 
     if manage_service and cfg.get('enabled'):
         try:
-            if nodes:
+            if effective_nodes:
                 if not service_name('status', check=False, name=SUB_SERVICE):
                     service_name('start', check=True, name=SUB_SERVICE)
                 enable_service_name(True, name=SUB_SERVICE)
@@ -1523,6 +1689,98 @@ def upgrade_core(version=CORE_VERSION, sha256=None, archive_path=None, arch=None
                 'currentVersion': current_core_version(CORE) or version,
                 'versionOutput': ver_out.splitlines()[0] if ver_out else version,
                 'backup': str(backup_bin) if had_old else '',
+            }
+
+
+GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/qingyechan/NodeLite/main/dist'
+
+
+def _read_script_version(path):
+    try:
+        text = Path(path).read_text(encoding='utf-8')
+        m = re.search(r"^VERSION\s*=\s*['\"]([^'\"]+)['\"]", text, re.MULTILINE)
+        return m.group(1) if m else ''
+    except OSError:
+        return ''
+
+
+def self_update_from_github(installer_url=None, sha256_url=None, installer_path=None, sha256_text=None, install_dir=None):
+    """Download dist/nodelite.run and dist/nodelite.run.sha256 from GitHub, verify SHA-256, and hot-update scripts without dropping nodes."""
+    import io
+    with lock():
+        target_dir = Path(install_dir or CORE.parent)
+        target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        old_ver = _read_script_version(target_dir/'nodelite.py') or _read_script_version(Path(__file__).resolve().parent/'nodelite.py')
+        resolved_installer_url = installer_url or f'{GITHUB_RAW_BASE}/nodelite.run'
+        resolved_sha256_url = sha256_url or f'{GITHUB_RAW_BASE}/nodelite.run.sha256'
+
+        with tempfile.TemporaryDirectory(prefix='.self-update-', dir=target_dir) as tmp:
+            tmp_dir = Path(tmp)
+            if sha256_text is None:
+                sha_file = tmp_dir/'nodelite.run.sha256'
+                checked(['curl', '-fsSL', '--proto', '=https', '--tlsv1.2', '--retry', '2',
+                         '--connect-timeout', '10', '--max-time', '30', resolved_sha256_url, '-o', str(sha_file)], timeout=35)
+                sha256_text = sha_file.read_text(encoding='utf-8')
+            m_hash = re.search(r'\b([0-9a-fA-F]{64})\b', str(sha256_text or ''))
+            if not m_hash:
+                raise RuntimeError('未能从 GitHub 获取有效的 64 位 SHA-256 校验值。')
+            expected_hash = m_hash.group(1).lower()
+
+            if installer_path:
+                run_file = Path(installer_path)
+            else:
+                run_file = tmp_dir/'nodelite.run'
+                checked(['curl', '-fsSL', '--proto', '=https', '--tlsv1.2', '--retry', '2',
+                         '--connect-timeout', '10', '--max-time', '90', resolved_installer_url, '-o', str(run_file)], timeout=100)
+
+            actual_hash = _sha256_file_chunked(run_file)
+            if actual_hash != expected_hash:
+                raise RuntimeError(f'GitHub 安装包 SHA-256 校验不一致（期望 {expected_hash[:12]}…，实际 {actual_hash[:12]}…），已中止更新。')
+
+            script_text = run_file.read_text(encoding='utf-8')
+            m_payload = re.search(r"base64 -d <<'PAYLOAD'[^\n]*\n(.*?)\nPAYLOAD\b", script_text, re.DOTALL)
+            if not m_payload:
+                raise RuntimeError('安装包格式不正确：未找到内嵌程序载荷。')
+
+            raw_tar_gz = base64.b64decode(m_payload.group(1).encode('ascii'))
+            stage_dir = tmp_dir/'staged'
+            stage_dir.mkdir(mode=0o700, exist_ok=True)
+            required_files = ('nodelite.py', 'runtime.py', 'protocols.py')
+            with tarfile.open(fileobj=io.BytesIO(raw_tar_gz), mode='r:gz') as archive:
+                for fname in required_files:
+                    try:
+                        member = archive.getmember(fname)
+                    except KeyError as err:
+                        raise RuntimeError(f'安装包内缺少必要文件：{fname}') from err
+                    src = archive.extractfile(member)
+                    if not src:
+                        raise RuntimeError(f'无法读取安装包文件：{fname}')
+                    out_file = stage_dir/fname
+                    out_file.write_bytes(src.read())
+                    out_file.chmod(0o700 if fname == 'nodelite.py' else 0o600)
+
+            new_ver = _read_script_version(stage_dir/'nodelite.py')
+            if not new_ver:
+                raise RuntimeError('更新包内的 nodelite.py 版本号校验失败。')
+
+            for fname in required_files:
+                dst = target_dir/fname
+                if dst.is_file():
+                    shutil.copy2(dst, target_dir/(fname + '.bak'))
+                os.replace(stage_dir/fname, dst)
+
+            if (ROOT/'sub'/'config.json').exists():
+                with contextlib.suppress(Exception):
+                    sync_subscription(manage_service=True)
+                    if service_name('status', check=False, name=SUB_SERVICE):
+                        service_name('restart', check=False, name=SUB_SERVICE)
+
+            return {
+                'updated': True,
+                'previousVersion': old_ver,
+                'currentVersion': new_ver,
+                'sha256': actual_hash,
+                'installDir': str(target_dir),
             }
 
 
