@@ -907,7 +907,7 @@ def sync_subscription(nodes=None, manage_service=True):
     releases.mkdir(mode=0o700, parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix='sub-', dir=releases))
     stage.chmod(0o700)
-    for name in ('clash.yaml', 'links.b64', 'raw.txt', 'meta.json'):
+    for name in ('clash.yaml', 'singbox.json', 'links.b64', 'raw.txt', 'meta.json'):
         f = stage/name
         f.write_text(bundle[name], encoding='utf-8')
         f.chmod(0o600)
@@ -1359,9 +1359,47 @@ class _SubRequestHandler(BaseHTTPRequestHandler):
             with contextlib.suppress(OSError):
                 upstream.close()
 
+    _CLASH_UA = ('clash', 'flclash', 'mihomo', 'verge', 'stash', 'nyanpasu', 'surfboard', 'karing', 'openclash')
+    _URI_UA = ('v2ray', 'shadowrocket', 'nekobox', 'nekoray', 'streisand', 'quantumult', 'loon', 'v2box', 'passwall', 'ssrplus', 'hiddify')
+    _SINGBOX_UA = ('sing-box', 'sfa/', 'sfi/', 'sfm/', 'sfx/')
+
+    def _resolve_sub_format(self, entry, query_str):
+        from urllib.parse import parse_qs
+        q = {k.lower(): v[0].lower() for k, v in parse_qs(query_str or '').items() if v}
+        flag = q.get('flag') or q.get('target') or q.get('type') or ''
+        if flag in ('clash', 'flclash', 'meta', 'mihomo', 'stash'):
+            return 'clash'
+        if flag in ('v2ray', 'v2rayn', 'v2rayng', 'shadowrocket', 'base64', 'links', 'nekobox', 'streisand'):
+            return 'b64'
+        if flag in ('singbox', 'sing-box', 'sfa', 'sfi'):
+            return 'singbox'
+        if flag in ('raw', 'uri', 'plain'):
+            return 'raw'
+
+        ua = (self.headers.get('User-Agent') or '').lower()
+        if entry == 'raw.txt':
+            return 'raw'
+        if entry == 'singbox.json':
+            return 'singbox'
+        if any(k in ua for k in self._SINGBOX_UA):
+            return 'singbox'
+        if entry in ('flclash.yaml', 'clash.yaml'):
+            if any(k in ua for k in self._URI_UA):
+                return 'b64'
+            return 'clash'
+        if entry in ('links.txt', 'v2ray.txt', 'shadowrocket.txt'):
+            if any(k in ua for k in self._CLASH_UA):
+                return 'clash'
+            return 'b64'
+        # entry in ('', 'sub') -> universal auto-adaptation by User-Agent
+        if any(k in ua for k in self._CLASH_UA):
+            return 'clash'
+        return 'b64'
+
     def do_GET(self):
         try:
-            req_path = urlsplit(self.path).path
+            split_url = urlsplit(self.path)
+            req_path = split_url.path
             if self.headers.get('Upgrade', '').lower() == 'websocket':
                 return self._proxy_websocket(req_path)
             sub_root = self.server.sub_root
@@ -1377,11 +1415,17 @@ class _SubRequestHandler(BaseHTTPRequestHandler):
                         tokens.append(val)
             entry = None
             for tok in tokens:
-                prefix = '/s/' + tok + '/'
+                base_prefix = '/s/' + tok
+                prefix = base_prefix + '/'
+                if req_path == base_prefix:
+                    entry = ''
+                    break
                 if len(req_path) >= len(prefix) and hmac.compare_digest(req_path[:len(prefix)].encode(), prefix.encode()):
                     entry = req_path[len(prefix):]
                     break
-            if entry not in ('flclash.yaml', 'clash.yaml', 'links.txt', 'sub', 'raw.txt', 'manifest.json'):
+            valid_entries = ('', 'sub', 'flclash.yaml', 'clash.yaml', 'links.txt',
+                             'v2ray.txt', 'shadowrocket.txt', 'singbox.json', 'raw.txt', 'manifest.json')
+            if entry not in valid_entries:
                 return self._reply(404, b'Not found\n')
             meta = json.loads((snap/'meta.json').read_text(encoding='utf-8'))
             if entry == 'manifest.json':
@@ -1389,10 +1433,16 @@ class _SubRequestHandler(BaseHTTPRequestHandler):
                 return self._reply(200, json.dumps(safe).encode('utf-8'), 'application/json')
             if meta.get('verified') is not True or meta.get('nodeCount', 0) < 1:
                 return self._reply(503, b'No verified nodes published\n')
-            if entry in ('flclash.yaml', 'clash.yaml'):
+
+            fmt = self._resolve_sub_format(entry, split_url.query)
+            if fmt == 'clash':
                 body = (snap/'clash.yaml').read_bytes()
                 ctype = 'application/yaml; charset=utf-8'
-            elif entry in ('links.txt', 'sub'):
+            elif fmt == 'singbox':
+                sb_file = snap/'singbox.json'
+                body = sb_file.read_bytes() if sb_file.is_file() else (snap/'clash.yaml').read_bytes()
+                ctype = 'application/json; charset=utf-8'
+            elif fmt == 'b64':
                 body = (snap/'links.b64').read_bytes()
                 ctype = 'text/plain; charset=utf-8'
             else:
@@ -1402,8 +1452,8 @@ class _SubRequestHandler(BaseHTTPRequestHandler):
             title = meta.get('title', '')
             if isinstance(title, str) and title:
                 extra['Profile-Title'] = 'base64:' + base64.b64encode(title.encode('utf-8')).decode('ascii')
-                if entry in ('flclash.yaml', 'clash.yaml'):
-                    extra['Content-Disposition'] = 'attachment; filename="flclash.yaml"; filename*=UTF-8\'\'' + quote(title)
+                if fmt == 'clash':
+                    extra['Content-Disposition'] = f"attachment; filename=\"flclash.yaml\"; filename*=UTF-8''{quote(title)}.yaml"
             info = meta.get('userinfo', '')
             if isinstance(info, str) and info and USERINFO_RE.fullmatch(info):
                 extra['Subscription-Userinfo'] = info

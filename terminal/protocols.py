@@ -112,10 +112,9 @@ def inbound(n):
         if p in ('hysteria2', 'tuic'):
             item['tls']['alpn'] = ['h3']
     elif p == 'ss2022':
-        item.update(method='2022-blake3-aes-128-gcm', password=n['ss_password'], network='tcp')
+        item.update(method='2022-blake3-aes-128-gcm', password=n['ss_password'])
     elif p == 'vmess':
         item.update(users=[{'uuid': n['uuid'], 'alterId': 0}],
-                    multiplex={'enabled': True, 'padding': False},
                     transport={'type': 'ws', 'path': n['ws_path'],
                                'max_early_data': 2048,
                                'early_data_header_name': 'Sec-WebSocket-Protocol'})
@@ -313,7 +312,8 @@ def uri(n):
     if p == 'vless':
         auth = n['uuid']
         q.update(encryption='none', flow=n.get('flow', 'xtls-rprx-vision'), security='reality',
-                 fp=n.get('fp', 'chrome'), pbk=n['public_key'], sid=n['short_id'], type='tcp')
+                 fp=n.get('fp', 'chrome'), pbk=n['public_key'], sid=n['short_id'],
+                 type='tcp', headerType='none')
     elif p == 'vmess':
         cf = n.get('cf_domain', '')
         cf_server = (n.get('cf_ip') or cf) if cf else ''
@@ -324,6 +324,7 @@ def uri(n):
                      host=ws_host, path=n['ws_path'], tls='tls' if tls_on else '')
         if tls_on:
             value['sni'] = cf or n['sni']
+            value['fp'] = 'chrome'
         return 'vmess://'+base64.b64encode(json.dumps(value, ensure_ascii=False).encode()).decode()
     elif p == 'ss2022':
         method = n.get('ss_method', '2022-blake3-aes-128-gcm')
@@ -333,9 +334,11 @@ def uri(n):
         auth = quote(n['password'], safe='')
         if p == 'tuic':
             auth = n['uuid']+':'+auth
-            q.update(congestion_control='cubic', alpn='h3')
-        if p == 'trojan':
-            q.update(security='tls', type='tcp')
+            q.update(congestion_control='cubic', alpn='h3', udp_relay_mode='native')
+        elif p == 'hysteria2':
+            q.update(alpn='h3')
+        elif p == 'trojan':
+            q.update(security='tls', type='tcp', headerType='none')
         if n.get('self_signed', True):
             q['insecure'] = '1'
             q['allowInsecure'] = '1'
@@ -349,26 +352,29 @@ def clash_proxy(n):
     cf = n.get('cf_domain', '') if p == 'vmess' else ''
     cf_server = (n.get('cf_ip') or cf) if cf else ''
     o = dict(name=n['name'], type={'ss2022': 'ss'}.get(p, p), server=cf_server or n['host'],
-             port=443 if cf else n['public_port'], udp=p != 'ss2022')
+             port=443 if cf else n['public_port'], udp=True)
     if p == 'vless':
-        o.update(uuid=n['uuid'], flow=n.get('flow', 'xtls-rprx-vision'), tls=True, servername=n['sni'],
-                 **{'client-fingerprint': n.get('fp', 'chrome'), 'reality-opts': {
-                     'public-key': n['public_key'], 'short-id': n['short_id']}})
+        o.update(uuid=n['uuid'], network='tcp', flow=n.get('flow', 'xtls-rprx-vision'),
+                 tls=True, servername=n['sni'],
+                 **{'skip-cert-verify': False, 'client-fingerprint': n.get('fp', 'chrome'),
+                    'reality-opts': {'public-key': n['public_key'], 'short-id': n['short_id']}})
     elif p in ('trojan', 'hysteria2', 'tuic'):
-        o.update(password=n['password'], **{'skip-cert-verify': n.get('self_signed', True)})
-        o['sni'] = n['sni']
-        if p == 'tuic':
-            o.update(uuid=n['uuid'], **{'congestion-controller': 'cubic', 'alpn': ['h3']})
+        o.update(password=n['password'], sni=n['sni'], **{'skip-cert-verify': n.get('self_signed', True)})
+        if p == 'trojan':
+            o['network'] = 'tcp'
+        elif p == 'hysteria2':
+            o['alpn'] = ['h3']
+        elif p == 'tuic':
+            o.update(uuid=n['uuid'], **{'congestion-controller': 'cubic', 'alpn': ['h3'], 'udp-relay-mode': 'native'})
     elif p == 'ss2022':
         o.update(cipher=n.get('ss_method', '2022-blake3-aes-128-gcm'), password=n['ss_password'])
     else:
         host_hdr = cf or n.get('ws_host') or n['sni']
-        ws_opts = {'path': n['ws_path'], 'headers': {'Host': host_hdr},
-                   'max-early-data': 2048, 'early-data-header-name': 'Sec-WebSocket-Protocol'}
-        o.update(uuid=n['uuid'], alterId=0, cipher='auto', network='ws', **{'ws-opts': ws_opts})
+        ws_opts = {'path': n['ws_path'], 'headers': {'Host': host_hdr}}
+        o.update(uuid=n['uuid'], alterId=0, cipher='auto', network='ws', tls=bool(cf or n.get('tls_enabled')),
+                 **{'ws-opts': ws_opts})
         if cf or n.get('tls_enabled'):
-            o.update(tls=True, servername=cf or n['sni'], **{'skip-cert-verify': False, 'client-fingerprint': 'chrome',
-                     'smux': {'enabled': True, 'protocol': 'h2mux', 'max-connections': 2, 'min-streams': 4}})
+            o.update(servername=cf or n['sni'], **{'skip-cert-verify': False, 'client-fingerprint': 'chrome'})
     if n.get('dialer_proxy'):
         o['dialer-proxy'] = n['dialer_proxy']
     return o
@@ -791,8 +797,46 @@ def clash_config(nodes, relay_chains=()):
     }
 
 
+def singbox_client_config(nodes):
+    """Build a standard sing-box client profile compatible with SFA / SFI / SFM / SFX."""
+    outbounds = []
+    names = []
+    for n in nodes:
+        o = outbound(n, local=False)
+        o['tag'] = n['name']
+        outbounds.append(o)
+        names.append(n['name'])
+    selector_list = (['⚡ 自动优选最快'] + names + ['direct']) if len(names) > 1 else ((names + ['direct']) if names else ['direct'])
+    groups = [{'type': 'selector', 'tag': '节点选择', 'outbounds': selector_list}]
+    if len(names) > 1:
+        groups.append({
+            'type': 'urltest',
+            'tag': '⚡ 自动优选最快',
+            'outbounds': names,
+            'url': 'https://www.gstatic.com/generate_204',
+            'interval': '3m',
+            'tolerance': 50,
+        })
+    return {
+        'log': {'level': 'warn', 'timestamp': True},
+        'inbounds': [{'type': 'mixed', 'tag': 'mixed-in', 'listen': '127.0.0.1', 'listen_port': 7890}],
+        'outbounds': groups + outbounds + [{'type': 'direct', 'tag': 'direct'}],
+        'route': {
+            'rules': [
+                {'ip_is_private': True, 'outbound': 'direct'},
+                {'domain_suffix': ['.cn', '.local', '.lan', 'baidu.com', 'qq.com', 'taobao.com', 'tmall.com',
+                                   'jd.com', 'bilibili.com', 'douyin.com', 'qianwen.com', 'tongyi.com',
+                                   'deepseek.com', 'aliyun.com', 'alicdn.com', 'wechat.com', '163.com'],
+                 'outbound': 'direct'},
+            ],
+            'final': '节点选择',
+        },
+    }
+
+
 def subscription_bundle(nodes, title='NodeLite', userinfo='', generation=None, relay_chains=()):
     yaml_text = json.dumps(clash_config(nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2) + '\n'
+    singbox_text = json.dumps(singbox_client_config(nodes), ensure_ascii=False, indent=2) + '\n'
     raw_links = '\n'.join(uri(n) for n in nodes) + ('\n' if nodes else '')
     b64_links = base64.b64encode(raw_links.strip().encode('utf-8')).decode('ascii')
     meta = {
@@ -809,6 +853,7 @@ def subscription_bundle(nodes, title='NodeLite', userinfo='', generation=None, r
     }
     return {
         'clash.yaml': yaml_text,
+        'singbox.json': singbox_text,
         'links.b64': b64_links,
         'raw.txt': raw_links,
         'meta.json': json.dumps(meta, ensure_ascii=False, indent=2) + '\n',
@@ -824,9 +869,11 @@ def subscription_urls(sub_cfg):
     token = sub_cfg['token']
     base = f'{scheme}://{formatted}:{port}/s/{token}'
     result = {
+        'universal': base + '/sub',
         'flclash': base + '/flclash.yaml',
         'clash': base + '/clash.yaml',
         'links': base + '/links.txt',
+        'singbox': base + '/singbox.json',
         'raw': base + '/raw.txt',
         'manifest': base + '/manifest.json',
     }
@@ -834,8 +881,10 @@ def subscription_urls(sub_cfg):
     if cf:
         cf_base = f'https://{cf}/s/{token}'
         result.update(
+            cf_universal=cf_base + '/sub',
             cf_flclash=cf_base + '/flclash.yaml',
             cf_links=cf_base + '/links.txt',
+            cf_singbox=cf_base + '/singbox.json',
             cf_raw=cf_base + '/raw.txt',
             cf_manifest=cf_base + '/manifest.json',
         )

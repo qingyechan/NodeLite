@@ -67,7 +67,7 @@ NodeLite/
     ├── build.py                 # 打包生成 dist/nodelite.run
     ├── README.md                # 详细端口规则、可靠性设计与架构说明
     └── tests/
-        ├── test_terminal.py     # 30 项单元与事务集成测试
+        ├── test_terminal.py     # 31 项单元与事务集成测试
         └── live_protocols.py    # Linux 回环真机六协议隔离实测与持续负载压测
 ```
 

@@ -248,12 +248,12 @@ def show_links():
         urls = subscription_urls(sub_cfg)
         cf_mode = sub_cfg.get('cf_mode', '')
         cf_tag = '永久固定域名' if cf_mode in ('named', 'cdn') else '临时隧道(重启会变)'
-        print('\n【在线自动更新订阅 URL（已内置国内直连分流 + 多机节点聚合）】')
+        print('\n【在线自动更新订阅 URL（智能识别 Clash / v2ray / 小火箭 / Sing-box）】')
         if urls.get('cf_flclash'):
-            print(f'  ★ Cloudflare HTTPS 订阅 ({cf_tag}) FlClash：'+urls['cf_flclash'])
-            print(f'  ★ Cloudflare HTTPS 订阅 ({cf_tag}) Base64 ：'+urls['cf_links'])
-        print('  VPS 原生 FlClash 订阅 URL：'+urls['flclash'])
-        print('  VPS 原生 Base64 订阅 URL ：'+urls['links'])
+            print(f'  ★ Cloudflare HTTPS 订阅 ({cf_tag}) Clash/通用：'+urls['cf_flclash'])
+            print(f'  ★ Cloudflare HTTPS 订阅 ({cf_tag}) v2ray/小火箭：'+urls['cf_links'])
+        print('  VPS 原生 Clash 订阅 URL（FlClash / Verge / CFW）：'+urls['flclash'])
+        print('  VPS 原生通用订阅 URL（v2rayN / 小火箭 / NekoBox）：'+urls['links'])
 
 
 def exports():
@@ -292,13 +292,14 @@ def print_sub_summary(cfg):
     print(f"\n在线订阅状态：{'运行中' if active else '未运行'} | 模式：{mode} | 隧道：{cf_desc}")
     print(f"订阅端口映射：VPS 内部 {cfg['port']}/TCP → 外部访问 {cfg['host']}:{cfg.get('public_port') or cfg['port']}")
     if urls.get('cf_flclash'):
-        print('  ★ Cloudflare HTTPS 自动更新 URL (FlClash) ：'+urls['cf_flclash'])
-        print('  ★ Cloudflare HTTPS 通用订阅 URL (Base64)  ：'+urls['cf_links'])
+        print('  ★ Cloudflare HTTPS 自动更新 URL (Clash/通用)   ：'+urls['cf_flclash'])
+        print('  ★ Cloudflare HTTPS 通用订阅 URL (v2ray/小火箭) ：'+urls['cf_links'])
         if cf_mode == 'quick':
             print('  ⚠️ 注意：当前为免域名临时隧道（*.trycloudflare.com），VPS 重启后地址会改变；长期使用请选“配置固定命名隧道或自有域名”。')
-    print('  FlClash 自动更新 URL ：'+urls['flclash'])
-    print('  通用 Base64 订阅 URL ：'+urls['links'])
-    print('  单节点纯文本列表 URL ：'+urls['raw'])
+    print('  Clash 自动更新 URL (FlClash / Verge / CFW / Stash)：'+urls['flclash'])
+    print('  通用 Base64 订阅 URL (v2rayN / v2rayNG / 小火箭)  ：'+urls['links'])
+    print('  Sing-box 客户端订阅 URL (SFA / SFI / SFM)        ：'+urls['singbox'])
+    print('  单节点纯文本列表 URL                              ：'+urls['raw'])
     if cfg.get('scheme') == 'http' and not urls.get('cf_flclash'):
         print('  注意：HTTP 订阅未加密传输，请勿在公开群聊泄露此 URL；有域名证书或开启 Cloudflare 隧道可使用 HTTPS。')
     elif cfg.get('self_signed'):

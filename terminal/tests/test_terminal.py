@@ -789,6 +789,75 @@ class V030OptimizationTests(unittest.TestCase):
                     self.assertTrue(res_real['updated'])
                     self.assertEqual(res_real['currentVersion'], '0.3.0')
 
+    def test_multi_client_subscription_user_agent_and_protocol_formats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)/'nodelite'
+            with patch.object(rt, 'ROOT', root), \
+                 patch.object(rt, 'CORE', Path(tmp)/'sing-box'), \
+                 patch.object(rt, 'checked', return_value=''), \
+                 patch.object(rt, 'service', return_value=True), \
+                 patch.object(rt, 'service_enabled', return_value=True), \
+                 patch.object(rt, 'enable_service'), \
+                 patch.object(rt, 'service_name', return_value=True), \
+                 patch.object(rt, 'enable_service_name'), \
+                 patch.object(rt, 'install_sub_unit'):
+                nodes = [
+                    p.new_node('vless', '节点-VLESS', '203.0.113.10', rt.free_tcp_port(), 53440, private_key='a'*43, public_key='b'*43),
+                    p.new_node('vmess', '节点-VMess', '203.0.113.10', rt.free_tcp_port(), 24055, cf_domain='sub.example.com', cf_ip='104.19.151.1'),
+                    p.new_node('hysteria2', '节点-HY2', '203.0.113.10', rt.free_tcp_port(), 20381, cert='/c.pem', key='/k.pem'),
+                    p.new_node('tuic', '节点-TUIC', '203.0.113.10', rt.free_tcp_port(), 37460, cert='/c.pem', key='/k.pem'),
+                    p.new_node('trojan', '节点-Trojan', '203.0.113.10', rt.free_tcp_port(), 28443, cert='/c.pem', key='/k.pem'),
+                    p.new_node('ss2022', '节点-SS2022', '203.0.113.10', rt.free_tcp_port(), 29443),
+                ]
+                rt.commit(nodes)
+                sub_port = rt.free_tcp_port()
+                cfg = rt.configure_subscription('203.0.113.10', sub_port, 40187, start_daemon=False)
+                server = rt.create_sub_server(root/'sub', bind='127.0.0.1', port=sub_port)
+                t = threading.Thread(target=server.serve_forever, daemon=True)
+                t.start()
+                try:
+                    def fetch(path, ua=''):
+                        c = http.client.HTTPConnection('127.0.0.1', sub_port, timeout=3)
+                        try:
+                            hdrs = {'User-Agent': ua} if ua else {}
+                            c.request('GET', path, headers=hdrs)
+                            resp = c.getresponse()
+                            return resp.status, resp.read().decode('utf-8')
+                        finally:
+                            c.close()
+
+                    # 1. Clash clients (FlClash / Clash Verge / CFW / Stash) get valid Clash config on both /flclash.yaml and /sub
+                    for ua in ('FlClash/v0.9.2', 'clash-verge/v2.4.2', 'ClashforWindows/0.20.39', 'Stash/2.6.0'):
+                        st, body = fetch(f"/s/{cfg['token']}/sub", ua)
+                        self.assertEqual(st, 200)
+                        parsed_clash = json.loads(body)
+                        self.assertEqual(len(parsed_clash['proxies']), 6)
+                        by_type = {px['type']: px for px in parsed_clash['proxies']}
+                        self.assertEqual(by_type['vless']['network'], 'tcp')
+                        self.assertFalse(by_type['vless']['skip-cert-verify'])
+                        self.assertNotIn('smux', by_type['vmess'])
+                        self.assertEqual(by_type['hysteria2']['alpn'], ['h3'])
+                        self.assertEqual(by_type['tuic']['udp-relay-mode'], 'native')
+
+                    # 2. v2rayN / v2rayNG / Shadowrocket / NekoBox get Base64 URI list even if user pasted /flclash.yaml or /sub
+                    for ua in ('v2rayN/6.45', 'v2rayNG/1.8.19', 'Shadowrocket/2080', 'NekoBox/4.0'):
+                        st, b64_body = fetch(f"/s/{cfg['token']}/flclash.yaml", ua)
+                        self.assertEqual(st, 200)
+                        lines = base64.b64decode(b64_body).decode('utf-8').strip().splitlines()
+                        self.assertEqual(len(lines), 6)
+                        for line in lines:
+                            parsed_node = p.parse_node_uri(line)
+                            self.assertIn(parsed_node['protocol'], p.PROTOCOLS)
+
+                    # 3. Sing-box official client (SFA / SFI / SFM) gets singbox.json profile
+                    st, sb_body = fetch(f"/s/{cfg['token']}/sub", 'SFA/1.11.0 (sing-box 1.11.0)')
+                    self.assertEqual(st, 200)
+                    sb_cfg = json.loads(sb_body)
+                    self.assertIn('outbounds', sb_cfg)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
 
 if __name__ == '__main__':
     unittest.main()
