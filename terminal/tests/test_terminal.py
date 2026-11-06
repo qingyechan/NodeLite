@@ -772,6 +772,17 @@ class V030OptimizationTests(unittest.TestCase):
                 self.assertIn('0.3.0', (opt_dir/'nodelite.py').read_text(encoding='utf-8'))
                 self.assertTrue((opt_dir/'nodelite.py.bak').is_file())
 
+                # 3. Verify against the real dist/nodelite.run built by build.py
+                real_dist = Path(__file__).resolve().parents[2]/'dist'
+                if (real_dist/'nodelite.run').is_file():
+                    res_real = rt.self_update_from_github(
+                        installer_path=real_dist/'nodelite.run',
+                        sha256_text=(real_dist/'nodelite.run.sha256').read_text(encoding='utf-8'),
+                        install_dir=opt_dir,
+                    )
+                    self.assertTrue(res_real['updated'])
+                    self.assertEqual(res_real['currentVersion'], '0.3.0')
+
 
 if __name__ == '__main__':
     unittest.main()

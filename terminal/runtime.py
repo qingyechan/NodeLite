@@ -1738,7 +1738,7 @@ def self_update_from_github(installer_url=None, sha256_url=None, installer_path=
                 raise RuntimeError(f'GitHub 安装包 SHA-256 校验不一致（期望 {expected_hash[:12]}…，实际 {actual_hash[:12]}…），已中止更新。')
 
             script_text = run_file.read_text(encoding='utf-8')
-            m_payload = re.search(r"base64 -d <<'PAYLOAD'[^\n]*\n(.*?)\nPAYLOAD\b", script_text, re.DOTALL)
+            m_payload = re.search(r"<<'PAYLOAD'[^\n]*\n(.*?)\nPAYLOAD\b", script_text, re.DOTALL)
             if not m_payload:
                 raise RuntimeError('安装包格式不正确：未找到内嵌程序载荷。')
 
@@ -1992,6 +1992,9 @@ def migrate_from_subprogress_lite(old_root=None, old_opt=None, start_services=Tr
         CLOUDFLARED.chmod(0o700)
 
     if not old_root.is_dir() or _is_managed_link(ROOT/'current'):
+        if start_services and (ROOT/'sub'/'config.json').exists():
+            with contextlib.suppress(Exception):
+                sync_subscription(manage_service=True)
         return {'migrated': False}
 
     old_current = old_root/'current'
