@@ -1362,8 +1362,8 @@ class _SubRequestHandler(BaseHTTPRequestHandler):
             with contextlib.suppress(OSError):
                 upstream.close()
 
-    _CLASH_UA = ('clash', 'flclash', 'mihomo', 'verge', 'stash', 'nyanpasu', 'surfboard', 'karing', 'openclash')
-    _URI_UA = ('v2ray', 'shadowrocket', 'nekobox', 'nekoray', 'streisand', 'quantumult', 'loon', 'v2box', 'passwall', 'ssrplus', 'hiddify')
+    _CLASH_UA = ('clash', 'flclash', 'mihomo', 'verge', 'stash', 'nyanpasu', 'surfboard', 'karing', 'openclash', 'party')
+    _URI_UA = ('v2ray', 'shadowrocket', 'nekobox', 'nekoray', 'streisand', 'quantumult', 'loon', 'v2box', 'passwall', 'ssrplus', 'hiddify', 'matsuri', 'sagernet', 'anxray')
     _SINGBOX_UA = ('sing-box', 'sfa/', 'sfi/', 'sfm/', 'sfx/')
 
     def _resolve_sub_format(self, entry, query_str):

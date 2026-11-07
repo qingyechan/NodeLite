@@ -77,17 +77,17 @@ def print_port_guide(kind='1', ssh_ports=None):
     print('  3. 节点内部端口  ：VPS 内 sing-box 监听端口（支持 443 或 1024–65535；NAT 填映射表同一行右边的内部端口）')
     print('  4. 在线订阅端口  ：公网自动更新订阅 URL 专用端口，必须与 SSH 端口、节点端口分开')
     if kind == '2':
-        print('\n【NAT 小鸡「商家后台端口映射表」傻瓜式对照表】')
+        print('\n【NAT 服务器端口映射对照表】')
         print('  ┌────────────┬──────────┬────────────────┬────────────────┬────────────────────────────┐')
-        print('  │ 商家映射行 │ 映射类型 │ 左边：公网端口 │ 右边：内部端口 │ 用途说明（照着填）         │')
+        print('  │ 后台映射行 │ 协议类型 │ 左边：公网端口 │ 右边：内部端口 │ 用途说明                   │')
         print('  ├────────────┼──────────┼────────────────┼────────────────┼────────────────────────────┤')
-        print('  │ 第 1 行    │ TCP      │ 如 23932       │ 22             │ ❌ SSH 登录专用，跳过别动！│')
-        print('  │ 第 2 行    │ TCP      │ 如 53440       │ 如 10086       │ ✅ 建 VLESS/VMess 节点     │')
-        print('  │ 第 3 行    │ TCP      │ 如 40187       │ 如 20000       │ ✅ 开启公网自动更新订阅    │')
-        print('  │ 第 4 行    │ UDP      │ 如 20381       │ 如 28443       │ ⚠️ 仅 Hysteria2 / TUIC 用  │')
+        print('  │ 第 1 行    │ TCP      │ 如 23932       │ 22             │ SSH 远程登录专用，切勿改动 │')
+        print('  │ 第 2 行    │ TCP      │ 如 53440       │ 如 10086       │ 创建 VLESS / VMess 等节点  │')
+        print('  │ 第 3 行    │ TCP      │ 如 40187       │ 如 20000       │ 开启在线自动更新订阅服务   │')
+        print('  │ 第 4 行    │ UDP      │ 如 20381       │ 如 28443       │ 仅 Hysteria2 / TUIC 使用   │')
         print('  └────────────┴──────────┴────────────────┴────────────────┴────────────────────────────┘')
-        print('  💡 核心原则：如果商家后台没有 UDP 映射（或不确定有没有 UDP），请【先用 TCP】！')
-        print('     直接选 1（VLESS Reality，只需一条 TCP 映射），填那行 TCP 的“公网端口”和“内部端口”即可。')
+        print('  说明：若服务商后台未提供 UDP 映射（或不确定是否支持 UDP），请优先使用 TCP 协议，')
+        print('        选择 1（VLESS Reality，仅需一条 TCP 映射），对应填写该行的公网端口与内部端口。')
 
 
 def prompt_nat_ssh_port(settings):
@@ -132,7 +132,7 @@ def creation_wizard():
             rt.write_json(rt.ROOT/'setup.json', dict(settings, host=host, network=kind))
 
     print('\n【第 2 步 / 共 3 步：填写连接协议与端口】')
-    print('💡 提示：NAT 小鸡如果没有 UDP 映射（或不确定），请务必【先用 TCP】，直接回车选 1（VLESS Reality）：')
+    print('提示：若 NAT 服务器后台未提供 UDP 映射（或不确定是否支持），请优先选择 TCP 协议，直接回车选 1（VLESS Reality）：')
     keys = list(PROTOCOLS)
     for i, key in enumerate(keys, 1):
         print(f'  {i}. {PROTOCOLS[key][0]}')
@@ -141,8 +141,8 @@ def creation_wizard():
         raise ValueError('没有这个协议编号。')
     protocol = keys[choice-1]
     if PROTOCOLS[protocol][1] == 'udp':
-        if ask('⚠️ 该协议需要 UDP！商家后台明确有 UDP 映射吗？（没有 UDP 请直接回车取消，改选 1 先用 TCP）输入 yes 才继续', 'no') != 'yes':
-            raise ValueError('已取消。没有 UDP 映射时请先选 1（VLESS Reality，只需 TCP）。')
+        if ask('注意：该协议需要 UDP 映射。服务商后台已提供 UDP 映射吗？（若无 UDP 请直接回车取消，改选 1 使用 TCP）输入 yes 继续', 'no') != 'yes':
+            raise ValueError('已取消。无 UDP 映射时请选择 1（VLESS Reality，仅需 TCP）。')
     nodes = rt.load_state()['nodes']
     name = valid_name(ask('给节点取个名字', '我的节点-'+str(len(nodes)+1)))
     print_port_guide(kind)
@@ -242,7 +242,7 @@ def show_links():
         extra = f" | Cloudflare 香港优选直连：{eff.get('cf_ip')} (SNI: {cf_domain}:443)" if eff.get('cf_domain') else ''
         print(f"\n【{node['name']}】（映射类型：{transport} | 内部端口 {node['port']} → 公网 {node['host']}:{node['public_port']}{extra}）")
         if node['port'] != node['public_port']:
-            print(f"📌 NAT 商家后台映射核对：【{transport} 映射】外部/公网端口 {node['public_port']} → 内部/内网端口 {node['port']}")
+            print(f"NAT 后台映射核对：【{transport} 映射】外部/公网端口 {node['public_port']} → 内部/内网端口 {node['port']}")
         print(f"状态：{stages['summary']}")
         print(uri(eff))
     if ext_nodes:
@@ -305,7 +305,7 @@ def print_sub_summary(cfg):
         print('  ★ Cloudflare HTTPS 自动更新 URL (Clash/通用)   ：'+urls['cf_flclash'])
         print('  ★ Cloudflare HTTPS 通用订阅 URL (v2ray/小火箭) ：'+urls['cf_links'])
         if cf_mode == 'quick':
-            print('  ⚠️ 注意：当前为免域名临时隧道（*.trycloudflare.com），VPS 重启后地址会改变；长期使用请选“配置固定命名隧道或自有域名”。')
+            print('  注意：当前为免域名临时隧道（*.trycloudflare.com），VPS 重启后地址会改变；长期使用请选“配置固定命名隧道或自有域名”。')
     print('  Clash 自动更新 URL (FlClash / Verge / CFW / Stash)：'+urls['flclash'])
     print('  通用 Base64 订阅 URL (v2rayN / v2rayNG / 小火箭)  ：'+urls['links'])
     print('  Sing-box 客户端订阅 URL (SFA / SFI / SFM)        ：'+urls['singbox'])
@@ -603,7 +603,7 @@ def doctor():
         cert_info = n.get('certExpiry')
         cert_txt = ''
         if cert_info:
-            warn = ' ⚠️即将到期/已过期！' if (cert_info['expired'] or cert_info['expiringSoon']) else ''
+            warn = ' [即将到期/已过期]' if (cert_info['expired'] or cert_info['expiringSoon']) else ''
             cert_txt = f" | 证书剩余 {cert_info['daysLeft']} 天 ({cert_info['expiresAt']}){warn}"
         print(f"  节点 {n['name']}：内部 {n['port']}/{n['transport']} → 公网 {n['host']}:{n['public_port']}{cert_txt}")
         print(f"    状态：{n['stages']['summary']} | 本机公网回环：{pub_txt}")
