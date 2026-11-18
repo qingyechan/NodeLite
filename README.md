@@ -1,6 +1,6 @@
 # NodeLite
 
-NodeLite 是一个运行在 Linux 终端下的代理节点部署与订阅管理工具。安装后在 SSH 终端输入 `nl`（或 `NL`）即可通过交互式菜单完成节点创建、单节点链接复制、配置文件导出、在线订阅开启、端口修改、核心升级、历史配置回滚及连通性排查。
+NodeLite 是一个运行在 Linux 终端下的代理节点部署与订阅管理工具。安装后在 SSH 终端输入 `nl`（或 `NL`）即可通过交互式菜单完成节点创建、单节点链接复制、配置文件导出、在线订阅开启、Cloudflare 隧道中转、多机链式代理、端口修改、核心升级、历史配置回滚及连通性排查。
 
 本项目针对小内存 VPS（128 MB 及以上）与共享 IP 的 NAT 服务器进行了轻量化设计：管理界面仅在执行命令时运行，退出后不驻留后台；代理服务由单个 `sing-box` 进程承载，在线订阅由基于 Python 3 标准库的轻量 HTTP/HTTPS 服务提供，无需安装 Docker、Node.js、数据库或 Web 面板。
 
@@ -8,12 +8,12 @@ NodeLite 是一个运行在 Linux 终端下的代理节点部署与订阅管理�
 
 ## 主要功能
 
-- **多协议支持与真实出站校验**：支持 VLESS Reality、VMess、Hysteria2、TUIC、Trojan、Shadowsocks 2022 六种协议。创建节点或修改配置时，先执行 `sing-box check` 语法检查，再通过本机临时客户端发起真实协议握手并访问 HTTPS 204 测试页，验证通过后才正式生效；若任一步骤失败则自动回滚至上一版配置。
+- **六协议支持与真实出站校验**：支持 VLESS Reality、VMess WebSocket、Trojan TLS、Shadowsocks 2022、Hysteria2、TUIC v5。每次创建节点或修改配置时，先执行 `sing-box check` 语法检查，再由本机临时客户端发起真实协议握手并访问 HTTPS 204 测试页，验证通过后才正式生效；若任一步骤失败则自动回滚至上一版配置。
 - **低内存占用**：管理程序仅使用 Python 3 标准库，无第三方依赖。`sing-box` 默认设置内存软上限（`GOMEMLIMIT=32MiB`），在线订阅服务采用小栈线程与只读快照设计，无节点时自动停止。
 - **多客户端自适应订阅**：开启在线订阅后，服务端可根据客户端请求的 `User-Agent` 自动返回对应格式的配置，同一条订阅地址可直接在主流代理软件中使用；节点增删、改名或换端口后订阅内容自动同步。
-- **内置国内直连与防污染分流规则**：生成的 Clash / Mihomo 配置文件内置 Fake-IP DNS、国内 DoH/DoT 解析以及常见国内网站、大陆 IP（`GEOIP,CN,DIRECT`）直连规则，国内访问直接连接，境外流量按策略转发。
+- **内置国内直连与防污染分流规则**：导出的 Clash / Mihomo 与 Sing-box 客户端配置均内置完整的国内常见网站、主流 CDN、国内 AI 服务及局域网直连规则，Clash 版另配 Fake-IP DNS 与 `GEOIP,CN,DIRECT` 兜底，国内访问直接连接，境外流量按策略转发。
 - **Reality 握手域名测速优选**：创建 VLESS Reality 节点时，自动并发测试当前服务器到各候选 TLS 1.3 域名的握手延迟，默认选用延迟最低的域名。
-- **多机节点汇总与链式代理**：支持将其他 VPS 的单节点分享链接汇总到当前订阅中，并支持配置基于 `dialer-proxy` 的前置中转与落地链式代理。
+- **双模式中转支持**：支持单机 **Cloudflare 隧道中转**（用于被墙 IP 救援或绕过 HTTP 端口屏蔽，不影响原生直连节点质量），也支持 **多机节点汇总与链式落地代理**（Clash `dialer-proxy` / Sing-box `detour`）。
 - **在线更新**：支持通过 `nl update` 或菜单选项从 GitHub 拉取最新安装包并校验 SHA-256，更新管理脚本时不中断正在运行的节点服务。
 
 ---
@@ -24,9 +24,9 @@ NodeLite 提供单节点分享链接、本地导出文件以及在线自动更�
 
 | 客户端类别 | 适配软件 | 订阅返回内容 |
 | :--- | :--- | :--- |
-| **Clash / Mihomo 系列** | FlClash、Clash Verge Rev、Clash Party、Mihomo Party、Clash for Windows、Stash、Karing、Surfboard、OpenClash | 标准 Clash YAML 配置（含节点组、自动测速、故障转移、DNS 及国内直连分流规则） |
-| **通用节点订阅客户端** | v2rayN、v2rayNG、Shadowrocket、NekoBox、Quantumult X、Loon、Streisand、V2Box、Hiddify、PassWall | 标准 Base64 编码节点列表（支持 VLESS、VMess、Hysteria2、TUIC、Trojan、SS2022） |
-| **Sing-box 官方客户端** | Sing-box（SFA / SFI / SFM / Windows） | 标准 Sing-box 客户端 JSON 配置（含入站、出站及基础分流规则） |
+| **Clash / Mihomo 系列** | FlClash、Clash Verge Rev、Clash Party、Mihomo Party、Clash for Windows、Stash、Karing、Surfboard、OpenClash | 标准 Clash YAML 配置（含节点组、自动测速、故障转移、链式代理 `dialer-proxy`、DNS 及完整国内直连分流规则） |
+| **通用节点订阅客户端** | v2rayN、v2rayNG、Shadowrocket、NekoBox、Quantumult X、Loon、Streisand、V2Box、Hiddify、PassWall | 标准 Base64 编码节点列表（支持六种协议及外部分享链接汇总；分流方式由客户端自身路由规则决定） |
+| **Sing-box 官方客户端** | Sing-box（SFA / SFI / SFM / Windows） | 标准 Sing-box 客户端 JSON 配置（含入站、出站、链式代理 `detour` 及同步的国内直连分流规则） |
 
 启用在线订阅后，菜单会同时列出适配不同软件的订阅地址；若在 v2rayN、Shadowrocket 等软件中直接填入 `.yaml` 结尾的订阅链接，服务端也会根据客户端标识自动返回 Base64 节点列表。
 
@@ -54,6 +54,56 @@ sh /root/nodelite.run
 
 ---
 
+## 快速上手与操作指引
+
+### 第一步：创建节点（菜单 `1`）
+
+1. 在终端输入 `nl`，输入 `1` 进入创建向导。
+2. 确认服务器公网 IP 与服务器类型（`1` 为独立 IP 普通 VPS，`2` 为共享 IP 的 NAT 服务器）。
+3. 选择协议编号（常规推荐选 `1. VLESS Reality`，无需域名；若需要通过 Cloudflare 隧道中转救援，则选 `4. VMess WebSocket`）。
+4. 按提示填写端口（NAT 服务器请对照下文“端口填写说明”填入同一条映射的公网端口与内部端口），确认后程序会自动完成配置检查、本机协议握手实测并输出分享链接。
+
+### 第二步：导入客户端（菜单 `2`、`3` 或 `4`）
+
+- **单条节点导入（菜单 `2`）**：复制终端输出的单节点分享链接，直接在客户端“从剪贴板导入”。
+- **本地导出文件（菜单 `3`）**：在 `/etc/nodelite/exports/` 生成 `flclash.yaml`、`singbox.json`、`links.txt` 和 `subscription.txt`，可通过 SSH 文件面板下载后直接导入对应客户端。
+- **开启在线自动更新订阅（菜单 `4`）**：
+  1. 选择 `4` → `1`，确认订阅访问地址（IP 或域名）及端口（需与 SSH 和节点端口区分），选择传输方式（`HTTP` 或 `HTTPS`）。
+  2. 开启后获得订阅 URL，将其粘贴至客户端“添加订阅 / 配置”中即可自动更新，后续增删、改名或修改端口均会自动同步。
+
+---
+
+## 中转功能使用说明（两种常见中转方式）
+
+NodeLite 内置两种不同用途的中转方式，可根据实际网络情况单独或组合使用：
+
+### 方式 A：Cloudflare 隧道中转（用于被墙 IP 救援或绕过 HTTP 限制）
+
+**适用场景**：VPS 公网 IP 的国内直连 TCP 端口被阻断、直连丢包严重，或机房限制普通端口 HTTP 订阅访问（只要 VPS 本身仍能访问外网，即使国内直连完全不通也可通过此方式恢复连接）。
+
+**是否影响原生节点**：**完全不影响**。隧道服务仅对接在线订阅和 `VMess WebSocket` 备用节点；本机原有的 `VLESS Reality`、`Trojan`、`SS2022` 等原生节点依然走服务器自身公网端口直连，互不干扰。
+
+**操作步骤**：
+1. 在菜单 `1` 创建一个 `4. VMess WebSocket` 节点（仅需一条普通 TCP 端口，可作为备用通道与已有 `VLESS Reality` 共存）。
+2. 打开菜单 `4` → `1` 开启本地订阅服务，随后根据需求二选一：
+   - **推荐（永久固定地址）**：选择菜单 `4` → `2`，绑定自己在 Cloudflare 托管的域名（支持 Zero Trust Named Tunnel，无需开放公网入站端口；或使用 Cloudflare CDN Origin Rules 回源，零额外内存占用）。绑定后订阅与备用节点域名永久固定，重启服务器不会改变。
+   - **临时使用（免域名）**：选择菜单 `4` → `3`，启动免域名临时隧道（`*.trycloudflare.com`）。程序会自动生成 `CF备用-香港极速1~5` 优选节点与对应的 HTTPS 订阅地址。**注意**：免费临时隧道在服务器或订阅服务重启后会重新分配域名，重启后需通过 `nl links` 查看并更新客户端里的订阅地址。
+3. 在客户端中切换选中 `CF备用-香港极速1` 或 `香港极速2` 即可稳定连通（通常不建议选用最后一个`默认域名`节点）。
+
+### 方式 B：多机汇总与链式代理中转（前置入口 → 落地出口）
+
+**适用场景**：手头有两台或以上 VPS，希望用国内直连速度快、延迟低的机器 A 作为“前置入口”，转发连接另一台直连较慢但解锁或 IP 质量更好的机器 B（“落地出口”），同时把多台机器汇总进同一个订阅地址管理。
+
+**操作步骤**：
+1. 在作为主管理机的 VPS 上打开菜单 `15`：
+   - 选 `1`：粘贴另一台 VPS（机器 B）的单节点分享链接（支持 `vless`、`vmess`、`hysteria2`、`hy2`、`tuic`、`trojan`、`ss` 的各类传输方式与 TLS/Reality 参数），即可将其合并到当前在线订阅中。
+   - 选 `2`：创建链式落地代理。按列表编号依次选择**前置入口节点**（机器 A）和**落地目标节点**（机器 B），确认名称后自动生成链式节点。
+2. 客户端刷新订阅即可使用：
+   - Clash / Mihomo 系列客户端会自动生成带 `dialer-proxy` 字段的链式节点；
+   - Sing-box 客户端会自动生成带 `detour` 字段的链式出站。
+
+---
+
 ## 端口填写说明（独立 IP 与 NAT 服务器）
 
 ### 1. 独立 IP 服务器（普通 VPS）
@@ -76,24 +126,42 @@ NAT 服务器通过服务商后台的“端口映射 / 端口转发”规则将�
 1. **协议与映射类型对应**：VLESS Reality、VMess、Trojan、Shadowsocks 2022 使用 TCP 传输；Hysteria2、TUIC 使用 UDP 传输。部分 NAT 服务器默认仅提供 TCP 转发，若后台未标明支持 UDP 映射，请优先选择 `VLESS Reality` 等基于 TCP 的协议。
 2. **公网端口与内部端口成对填写**：同一条转发规则中的外部端口与内部端口需一一对应填写，不可将不同规则行的端口混用。
 3. **节点与订阅端口分离**：代理节点与在线订阅属于两个独立服务，需分别使用不同的端口映射规则。
-4. **受限网络下的订阅访问**：若部分服务器机房限制普通端口的 HTTP 访问，可在菜单 `4` 中启用 Cloudflare 隧道（支持固定域名隧道或免域名临时隧道），通过 HTTPS 域名拉取订阅。
 
 ---
 
-## 常用命令
+## 菜单功能与常用命令对照
 
-除输入 `nl` 进入交互菜单外，也可直接通过命令行参数执行对应操作：
+输入 `nl` 或 `NL` 打开主菜单后，共有 16 项功能：
 
-```sh
-nl              # 打开中文数字交互菜单（输入 NL 同样有效）
-nl links        # 查看所有节点分享链接、外部汇总节点、链式代理与在线订阅地址
-nl export       # 在 /etc/nodelite/exports/ 导出 flclash.yaml、singbox.json、links.txt 与 subscription.txt
-nl external     # 查看或管理汇总的外部节点与 dialer-proxy 链式代理
-nl update       # 从 GitHub 拉取最新版本并校验 SHA-256 在线更新（不中断节点运行）
-nl test         # 对所有已配置节点执行本机真实协议连通性自测
-nl doctor       # 查看各组件内存占用、证书剩余有效期、端口监听状态与排障说明
-nl rollback     # 恢复至上一版保存的节点配置
-```
+| 菜单编号 | 功能说明 | 对应命令行快捷指令 |
+| :--- | :--- | :--- |
+| `1` | 创建节点（支持环境检测、端口映射引导、Reality SNI 测速优选与出站实测） | `nl add --host ... --port ...` |
+| `2` | 查看与复制所有单节点链接、外部汇总节点、链式代理及在线订阅 URL | `nl links` |
+| `3` | 导出 `flclash.yaml`、`singbox.json`、`links.txt`、`subscription.txt` 至本地目录 | `nl export` |
+| `4` | 开启或管理在线订阅服务（HTTP/HTTPS、令牌重置、Cloudflare 隧道设置） | `nl sub ...` |
+| `5` | 对所有已配置节点执行服务器端真实协议连通性自测 | `nl test` |
+| `6` | 查看各进程内存占用明细、证书剩余天数、端口监听状态及四步断连排查 | `nl doctor` |
+| `7` | 修改节点名称（保留原有 UUID、密码、密钥与端口） | — |
+| `8` | 修改节点内部监听端口或 NAT 公网端口（自动更新防火墙规则） | `nl port --node 名称 --port 新端口` |
+| `9` | 删除指定节点（删除最后一个节点后自动停止对应服务） | — |
+| `10` | 检测、备份并清理旧版残留服务（自动区分归属，避免误停第三方服务） | `nl legacy` |
+| `11` | 校验或升级 `sing-box` 核心（SHA-256 校验、配置预检、失败自动回滚） | `nl upgrade-core` |
+| `12` | 恢复至上一版保存的节点配置 | `nl rollback` |
+| `13` | 重启 NodeLite 核心与订阅服务 | `nl restart` |
+| `14` | 卸载 NodeLite 服务（配置目录自动重命名备份，不删除其他无关程序） | — |
+| `15` | 添加与管理其他 VPS 外部节点及 `dialer-proxy` / `detour` 链式落地代理 | `nl external` |
+| `16` | 从 GitHub 拉取最新版本并校验 SHA-256 在线更新（不中断正在运行的节点） | `nl update` |
+
+---
+
+## 连接异常排查说明（`nl doctor`）
+
+当客户端无法连接节点时，在终端运行 `nl doctor` 可按以下四步快速定位原因：
+
+1. **内部协议自测失败**：检查服务器出站网络、DNS 设置或更换 Reality 伪装域名。
+2. **SSH 可以直连，但节点端口不通**：核对服务商后台的 NAT 映射表（确认公网端口与内部端口未填反、协议类型 TCP/UDP 一致）以及云安全组 / 系统防火墙放行状态。
+3. **内部自测通过，经海外代理测试节点端口也通，但本地直连 SSH 与节点端口全部超时（即使 Ping 仍通）**：说明服务器公网 IP 的跨境 TCP 直连已被阻断，节点配置本身正常；可在服务商后台更换 IP，或按上文“方式 A”建立 `VMess + Cloudflare 隧道` 备用通道恢复使用。
+4. **Hysteria2 / TUIC 节点不通**：确认服务商 NAT 转发规则与系统防火墙均已放行 UDP 协议，而非仅放行 TCP。
 
 ---
 
