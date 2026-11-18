@@ -68,7 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/qingyechan/NodeLite/main/dist/nodel
 ## 分享链接、本地导出与多客户端在线订阅
 
 - **菜单 `2`（查看单节点分享链接）**：输出标准 `vless://`、`vmess://`、`hysteria2://`、`tuic://`、`trojan://`、`ss://` 链接；若已启用在线订阅，会一并显示订阅地址。
-- **菜单 `3`（导出本地配置文件）**：在 `/etc/nodelite/exports/` 下生成 `flclash.yaml`、`links.txt` 与 `subscription.txt`，可通过 SFTP 下载至本地导入客户端。
+- **菜单 `3`（导出本地配置文件）**：在 `/etc/nodelite/exports/` 下生成 `flclash.yaml`、`singbox.json`、`links.txt` 与 `subscription.txt`，可通过 SFTP 下载至本地导入客户端。
 - **菜单 `4`（开启 / 管理在线订阅服务）**：
   - 启动轻量订阅服务 `nodelite-sub`，根据客户端 `User-Agent` 或路径后缀返回对应格式：
     - Clash / Mihomo 系列（FlClash、Clash Verge Rev、Clash Party、CFW、Stash 等）：`http(s)://地址:公网端口/s/<令牌>/flclash.yaml`（兼容 `/clash.yaml` 与 `/sub`）

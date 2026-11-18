@@ -14,6 +14,7 @@ from protocols import (
     PROTOCOLS,
     clash_config,
     new_node,
+    singbox_client_config,
     subscription_urls,
     uri,
     valid_host,
@@ -273,17 +274,23 @@ def exports():
     directory = rt.ROOT/'exports'
     directory.mkdir(mode=0o700, exist_ok=True)
     links = '\n'.join(uri(n) for n in eff_nodes)+'\n'
-    for name, data in [('links.txt', links), ('subscription.txt', base64.b64encode(links.encode()).decode()),
-                       ('flclash.yaml', json.dumps(clash_config(eff_nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2))]:
+    files = [
+        ('links.txt', links),
+        ('subscription.txt', base64.b64encode(links.encode()).decode()),
+        ('flclash.yaml', json.dumps(clash_config(eff_nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2)),
+        ('singbox.json', json.dumps(singbox_client_config(eff_nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2)),
+    ]
+    for name, data in files:
         path = directory/name
         path.write_text(data, encoding='utf-8')
         path.chmod(0o600)
         print(str(path))
-    print('用 SSH 软件的文件面板下载：FlClash 导入 flclash.yaml（已内置国内直连分流与多机/链式节点）；通用客户端导入 links.txt。')
+    print('用 SSH 软件的文件面板下载：FlClash 导入 flclash.yaml（已内置国内直连分流与多机/链式节点）；Sing-box 客户端导入 singbox.json；通用客户端导入 links.txt。')
     sub_cfg = rt.load_sub_config()
     if sub_cfg.get('enabled'):
         urls = subscription_urls(sub_cfg)
-        print('已启用公网订阅 URL（FlClash“添加配置 → URL”可直接粘贴自动更新）：\n  '+urls['flclash'])
+        best_url = urls.get('cf_flclash') or urls['flclash']
+        print('已启用公网订阅 URL（FlClash“添加配置 → URL”可直接粘贴自动更新）：\n  '+best_url)
     else:
         print('提示：如需在 FlClash 中粘贴 URL 自动更新，请选择主菜单“4. 开启 / 管理公网订阅 URL”。')
 
@@ -571,6 +578,10 @@ def self_update_menu():
         return
     res = rt.self_update_from_github()
     print(f"更新完成：{res['previousVersion'] or VERSION} → {res['currentVersion']} (SHA-256: {res['sha256'][:16]}…)")
+    if res.get('subRestarted'):
+        print('已刷新订阅快照并重启在线订阅服务。')
+    elif res.get('subRestartSkippedQuickTunnel'):
+        print('已使用新版代码刷新订阅快照；为保留当前临时 Cloudflare 隧道域名，未重启在线订阅进程。')
     print('重新运行 nl 即可使用新版本菜单。')
 
 
@@ -669,7 +680,7 @@ def edit_or_delete(delete=False):
 
 
 def clear_exports():
-    for name in ('links.txt', 'subscription.txt', 'flclash.yaml'):
+    for name in ('links.txt', 'subscription.txt', 'flclash.yaml', 'singbox.json'):
         (rt.ROOT/'exports'/name).unlink(missing_ok=True)
 
 

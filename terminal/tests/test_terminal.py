@@ -858,6 +858,69 @@ class V030OptimizationTests(unittest.TestCase):
                     server.shutdown()
                     server.server_close()
 
+    def test_heterogeneous_external_nodes_singbox_relay_dns_and_name_collisions(self):
+        # 1. External VLESS+TLS+WS must NOT emit reality-opts or reality block
+        ext_vless_ws = p.parse_node_uri(
+            'vless://3d376695-dde3-4789-a98d-d139e28cc862@example.com:443'
+            '?security=tls&sni=cdn.example.com&type=ws&host=ws.example.com&path=%2Fws&allowInsecure=1#原名',
+            custom_name='自定义VLESS-WS',
+        )
+        self.assertEqual(ext_vless_ws['security'], 'tls')
+        self.assertEqual(ext_vless_ws['net'], 'ws')
+        sb_vless = p.outbound(ext_vless_ws)
+        self.assertNotIn('reality', sb_vless['tls'])
+        self.assertTrue(sb_vless['tls']['insecure'])
+        self.assertEqual(sb_vless['transport']['type'], 'ws')
+        self.assertEqual(sb_vless['transport']['path'], '/ws')
+        self.assertEqual(sb_vless['transport']['headers']['Host'], 'ws.example.com')
+        cl_vless = p.clash_proxy(ext_vless_ws)
+        self.assertNotIn('reality-opts', cl_vless)
+        self.assertEqual(cl_vless['network'], 'ws')
+        self.assertTrue(cl_vless['skip-cert-verify'])
+        self.assertIn('security=tls', p.uri(ext_vless_ws))
+        self.assertIn('type=ws', p.uri(ext_vless_ws))
+
+        # 2. External VMess TCP must preserve net=tcp instead of forcing ws
+        vmess_tcp_b64 = base64.b64encode(json.dumps({
+            'v': '2', 'ps': 'tcp-vmess', 'add': '203.0.113.20', 'port': '10086',
+            'id': '3d376695-dde3-4789-a98d-d139e28cc862', 'aid': '0', 'net': 'tcp', 'scy': 'aes-128-gcm',
+        }).encode()).decode()
+        ext_vmess_tcp = p.parse_node_uri('vmess://' + vmess_tcp_b64, custom_name='外部TCP-VMess')
+        self.assertEqual(ext_vmess_tcp['net'], 'tcp')
+        sb_vmess = p.outbound(ext_vmess_tcp)
+        self.assertNotIn('transport', sb_vmess)
+        self.assertEqual(sb_vmess['security'], 'aes-128-gcm')
+        cl_vmess = p.clash_proxy(ext_vmess_tcp)
+        self.assertEqual(cl_vmess['network'], 'tcp')
+        self.assertNotIn('ws-opts', cl_vmess)
+
+        # 3. Sing-box client config must include relay_chains via detour
+        front = p.new_node('vless', '入口JP', '203.0.113.10', 10086, 53440, public_key='3zljW9ibrZOUBGnEjPqI2nKASUCkuBVnBR-rFuHsdxw')
+        sb_cfg = p.singbox_client_config([front, ext_vless_ws], relay_chains=[
+            {'name': '链式Relay', 'front': '入口JP', 'exit': '自定义VLESS-WS'},
+        ])
+        sb_by_tag = {o['tag']: o for o in sb_cfg['outbounds']}
+        self.assertIn('链式Relay', sb_by_tag)
+        self.assertEqual(sb_by_tag['链式Relay']['detour'], '入口JP')
+
+        # 4. Clash DNS fallback must route through 节点选择
+        clash_cfg = p.clash_config([front, ext_vless_ws])
+        self.assertTrue(all('#节点选择' in item for item in clash_cfg['dns']['fallback']))
+
+        # 5. Reserved proxy group names and cross-node collisions must be rejected
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(rt, 'ROOT', Path(tmp)/'nodelite'):
+                bad_reserved = p.new_node('ss2022', '国内直连', '203.0.113.10', rt.free_tcp_port())
+                with self.assertRaisesRegex(ValueError, '保留字'):
+                    rt.check_ports([bad_reserved], [])
+                rt.save_external_config({
+                    'external_nodes': [ext_vless_ws],
+                    'relay_chains': [{'id': 'c1', 'name': '链式Relay', 'front': '入口JP', 'exit': '自定义VLESS-WS'}],
+                }, sync=False)
+                bad_ext_dup = p.new_node('ss2022', '自定义VLESS-WS', '203.0.113.10', rt.free_tcp_port())
+                with self.assertRaisesRegex(ValueError, '外部/链式节点冲突'):
+                    rt.check_ports([bad_ext_dup], [])
+
 
 if __name__ == '__main__':
     unittest.main()

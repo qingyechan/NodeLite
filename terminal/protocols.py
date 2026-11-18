@@ -135,10 +135,33 @@ def outbound(n, local=False):
              server=('::1' if ':' in n['host'] else '127.0.0.1') if local else (cf_server or n['host']),
              server_port=n['port'] if local else (443 if cf else n['public_port']))
     if p == 'vless':
-        o.update(uuid=n['uuid'], flow='xtls-rprx-vision', tls={
-            'enabled': True, 'server_name': n['sni'],
-            'utls': {'enabled': True, 'fingerprint': 'chrome'},
-            'reality': {'enabled': True, 'public_key': n['public_key'], 'short_id': n['short_id']}})
+        sec = n.get('security') or ('reality' if n.get('public_key') else 'none')
+        net = (n.get('net') or 'tcp').lower()
+        o['uuid'] = n['uuid']
+        if net == 'tcp' and n.get('flow'):
+            o['flow'] = n['flow']
+        elif not n.get('external') and net == 'tcp':
+            o['flow'] = 'xtls-rprx-vision'
+        if sec == 'reality':
+            o['tls'] = {
+                'enabled': True, 'server_name': n['sni'],
+                'utls': {'enabled': True, 'fingerprint': n.get('fp', 'chrome')},
+                'reality': {'enabled': True, 'public_key': n['public_key'], 'short_id': n.get('short_id', '')},
+            }
+        elif sec == 'tls':
+            tls_cfg = {
+                'enabled': True, 'server_name': n['sni'],
+                'insecure': bool(n.get('self_signed', False)),
+                'utls': {'enabled': True, 'fingerprint': n.get('fp', 'chrome')},
+            }
+            if n.get('alpn'):
+                tls_cfg['alpn'] = list(n['alpn'])
+            o['tls'] = tls_cfg
+        if net == 'ws':
+            o['transport'] = {'type': 'ws', 'path': n.get('ws_path', '/'),
+                              'headers': {'Host': n.get('ws_host') or n['sni']}}
+        elif net == 'grpc':
+            o['transport'] = {'type': 'grpc', 'service_name': n.get('service_name', '')}
     elif p in ('trojan', 'hysteria2', 'tuic'):
         o.update(password=n['password'], tls={'enabled': True, 'server_name': n['sni'],
                  'insecure': n.get('self_signed', True)})
@@ -147,14 +170,26 @@ def outbound(n, local=False):
         if p == 'tuic':
             o.update(uuid=n['uuid'], congestion_control='cubic')
     elif p == 'ss2022':
-        o.update(method='2022-blake3-aes-128-gcm', password=n['ss_password'])
+        o.update(method=n.get('ss_method', '2022-blake3-aes-128-gcm'), password=n['ss_password'])
     else:
-        host_hdr = cf or n['sni']
-        o.update(uuid=n['uuid'], security='auto',
-                 transport={'type': 'ws', 'path': n['ws_path'], 'headers': {'Host': host_hdr},
-                            'max_early_data': 2048, 'early_data_header_name': 'Sec-WebSocket-Protocol'})
-        if cf:
-            o['tls'] = {'enabled': True, 'server_name': cf}
+        net = (n.get('net') or 'ws').lower()
+        host_hdr = cf or n.get('ws_host') or n['sni']
+        o.update(uuid=n['uuid'], security=n.get('scy', 'auto'))
+        if net == 'ws':
+            ws_tr = {'type': 'ws', 'path': n.get('ws_path', '/'), 'headers': {'Host': host_hdr}}
+            if not n.get('external'):
+                ws_tr['max_early_data'] = 2048
+                ws_tr['early_data_header_name'] = 'Sec-WebSocket-Protocol'
+            o['transport'] = ws_tr
+        elif net == 'grpc':
+            o['transport'] = {'type': 'grpc', 'service_name': n.get('service_name') or n.get('ws_path', '')}
+        if cf or n.get('tls_enabled'):
+            tls_cfg = {'enabled': True, 'server_name': cf or n['sni']}
+            if n.get('self_signed'):
+                tls_cfg['insecure'] = True
+            o['tls'] = tls_cfg
+    if n.get('detour'):
+        o['detour'] = n['detour']
     return o
 
 
@@ -181,8 +216,11 @@ def parse_node_uri(raw_uri, custom_name=None):
         port = valid_port(data.get('port', 443))
         name = valid_name(custom_name or data.get('ps') or f'外部VMess-{host}:{port}')
         tls_on = str(data.get('tls', '')).lower() == 'tls'
-        sni = data.get('sni') or data.get('host') or 'www.microsoft.com'
+        net = str(data.get('net') or 'tcp').lower()
+        scy = str(data.get('scy') or 'auto')
+        sni = data.get('sni') or data.get('host') or (host if not re.fullmatch(r'[0-9.:a-fA-F]+', host) else 'www.microsoft.com')
         ws_host = data.get('host') or sni
+        insecure = str(data.get('allowInsecure', data.get('insecure', ''))).lower() in ('1', 'true')
         node = dict(
             id='ext-' + secrets.token_hex(5),
             external=True,
@@ -193,9 +231,13 @@ def parse_node_uri(raw_uri, custom_name=None):
             public_port=port,
             sni=sni if re.fullmatch(r'[A-Za-z0-9.-]+', str(sni)) else 'www.microsoft.com',
             ws_host=ws_host,
+            net=net,
+            scy=scy,
             uuid=str(uuid.UUID(str(data.get('id', '')))),
             ws_path=str(data.get('path') or '/'),
+            service_name=str(data.get('path') or ''),
             tls_enabled=tls_on,
+            self_signed=insecure,
             raw_uri=text if not custom_name else '',
         )
         return node
@@ -210,7 +252,14 @@ def parse_node_uri(raw_uri, custom_name=None):
 
     if scheme == 'vless':
         user_uuid = str(uuid.UUID(unquote(parsed.username or '')))
-        sni = q.get('sni') or q.get('host') or 'www.microsoft.com'
+        pbk = q.get('pbk', '')
+        sec = q.get('security', '').lower() or ('reality' if pbk else ('tls' if q.get('sni') else 'none'))
+        if sec == 'reality' and not pbk:
+            raise ValueError('VLESS Reality 链接缺少 pbk 公钥参数')
+        net = q.get('type', 'tcp').lower()
+        sni = q.get('sni') or q.get('host') or (host if not re.fullmatch(r'[0-9.:a-fA-F]+', host) else 'www.microsoft.com')
+        insecure = q.get('allowInsecure', q.get('insecure', '0')) in ('1', 'true', 'True')
+        alpn = [x.strip() for x in q.get('alpn', '').split(',') if x.strip()]
         name = valid_name(custom_name or frag_name or f'外部VLESS-{host}:{port}')
         return dict(
             id='ext-' + secrets.token_hex(5),
@@ -222,10 +271,17 @@ def parse_node_uri(raw_uri, custom_name=None):
             public_port=port,
             sni=sni,
             uuid=user_uuid,
-            flow=q.get('flow', 'xtls-rprx-vision'),
-            public_key=q.get('pbk', ''),
+            security=sec,
+            net=net,
+            flow=q.get('flow', 'xtls-rprx-vision' if (sec == 'reality' and net == 'tcp') else ''),
+            public_key=pbk,
             short_id=q.get('sid', ''),
             fp=q.get('fp', 'chrome'),
+            ws_path=q.get('path', '/'),
+            ws_host=q.get('host', ''),
+            service_name=q.get('serviceName', ''),
+            alpn=alpn,
+            self_signed=insecure,
             raw_uri=text if not custom_name else '',
         )
 
@@ -311,17 +367,39 @@ def uri(n):
     q = {'sni': n['sni']}
     if p == 'vless':
         auth = n['uuid']
-        q.update(encryption='none', flow=n.get('flow', 'xtls-rprx-vision'), security='reality',
-                 fp=n.get('fp', 'chrome'), pbk=n['public_key'], sid=n['short_id'],
-                 type='tcp', headerType='none')
+        sec = n.get('security') or ('reality' if n.get('public_key') else 'none')
+        net = (n.get('net') or 'tcp').lower()
+        q = {'encryption': 'none', 'security': sec, 'type': net}
+        if net == 'tcp':
+            q['headerType'] = 'none'
+            if n.get('flow'):
+                q['flow'] = n['flow']
+            elif not n.get('external'):
+                q['flow'] = 'xtls-rprx-vision'
+        elif net == 'ws':
+            q['path'] = n.get('ws_path', '/')
+            if n.get('ws_host'):
+                q['host'] = n['ws_host']
+        elif net == 'grpc' and n.get('service_name'):
+            q['serviceName'] = n['service_name']
+        if sec in ('reality', 'tls'):
+            q['sni'] = n['sni']
+            q['fp'] = n.get('fp', 'chrome')
+        if sec == 'reality':
+            q['pbk'] = n['public_key']
+            q['sid'] = n.get('short_id', '')
+        elif sec == 'tls' and n.get('self_signed'):
+            q['allowInsecure'] = '1'
     elif p == 'vmess':
         cf = n.get('cf_domain', '')
         cf_server = (n.get('cf_ip') or cf) if cf else ''
         tls_on = bool(cf or n.get('tls_enabled'))
+        net = (n.get('net') or 'ws').lower()
         ws_host = cf or n.get('ws_host') or n['sni']
         value = dict(v='2', ps=n['name'], add=cf_server or n['host'], port='443' if cf else str(n['public_port']),
-                     id=n['uuid'], aid='0', scy='auto', net='ws', type='none',
-                     host=ws_host, path=n['ws_path'], tls='tls' if tls_on else '')
+                     id=n['uuid'], aid='0', scy=n.get('scy', 'auto'), net=net, type='none',
+                     host=ws_host if net == 'ws' else '', path=n.get('ws_path', '/') if net in ('ws', 'grpc') else '',
+                     tls='tls' if tls_on else '')
         if tls_on:
             value['sni'] = cf or n['sni']
             value['fp'] = 'chrome'
@@ -354,10 +432,26 @@ def clash_proxy(n):
     o = dict(name=n['name'], type={'ss2022': 'ss'}.get(p, p), server=cf_server or n['host'],
              port=443 if cf else n['public_port'], udp=True)
     if p == 'vless':
-        o.update(uuid=n['uuid'], network='tcp', flow=n.get('flow', 'xtls-rprx-vision'),
-                 tls=True, servername=n['sni'],
-                 **{'skip-cert-verify': False, 'client-fingerprint': n.get('fp', 'chrome'),
-                    'reality-opts': {'public-key': n['public_key'], 'short-id': n['short_id']}})
+        sec = n.get('security') or ('reality' if n.get('public_key') else 'none')
+        net = (n.get('net') or 'tcp').lower()
+        o.update(uuid=n['uuid'], network=net, tls=sec in ('reality', 'tls'),
+                 **{'skip-cert-verify': bool(n.get('self_signed', False))})
+        if net == 'tcp':
+            flow = n.get('flow') if n.get('external') else 'xtls-rprx-vision'
+            if flow:
+                o['flow'] = flow
+        elif net == 'ws':
+            o['ws-opts'] = {'path': n.get('ws_path', '/'),
+                            'headers': {'Host': n.get('ws_host') or n['sni']}}
+        elif net == 'grpc':
+            o['grpc-opts'] = {'grpc-service-name': n.get('service_name', '')}
+        if sec in ('reality', 'tls'):
+            o['servername'] = n['sni']
+            o['client-fingerprint'] = n.get('fp', 'chrome')
+            if n.get('alpn'):
+                o['alpn'] = list(n['alpn'])
+        if sec == 'reality':
+            o['reality-opts'] = {'public-key': n['public_key'], 'short-id': n.get('short_id', '')}
     elif p in ('trojan', 'hysteria2', 'tuic'):
         o.update(password=n['password'], sni=n['sni'], **{'skip-cert-verify': n.get('self_signed', True)})
         if p == 'trojan':
@@ -369,12 +463,17 @@ def clash_proxy(n):
     elif p == 'ss2022':
         o.update(cipher=n.get('ss_method', '2022-blake3-aes-128-gcm'), password=n['ss_password'])
     else:
+        net = (n.get('net') or 'ws').lower()
         host_hdr = cf or n.get('ws_host') or n['sni']
-        ws_opts = {'path': n['ws_path'], 'headers': {'Host': host_hdr}}
-        o.update(uuid=n['uuid'], alterId=0, cipher='auto', network='ws', tls=bool(cf or n.get('tls_enabled')),
-                 **{'ws-opts': ws_opts})
+        o.update(uuid=n['uuid'], alterId=0, cipher=n.get('scy', 'auto'), network=net,
+                 tls=bool(cf or n.get('tls_enabled')))
+        if net == 'ws':
+            o['ws-opts'] = {'path': n.get('ws_path', '/'), 'headers': {'Host': host_hdr}}
+        elif net == 'grpc':
+            o['grpc-opts'] = {'grpc-service-name': n.get('service_name') or n.get('ws_path', '')}
         if cf or n.get('tls_enabled'):
-            o.update(servername=cf or n['sni'], **{'skip-cert-verify': False, 'client-fingerprint': 'chrome'})
+            o.update(servername=cf or n['sni'],
+                     **{'skip-cert-verify': bool(n.get('self_signed', False)), 'client-fingerprint': 'chrome'})
     if n.get('dialer_proxy'):
         o['dialer-proxy'] = n['dialer_proxy']
     return o
@@ -388,21 +487,21 @@ AIRPORT_DNS_CONFIG = {
     'fake-ip-range': '198.18.0.1/16',
     'use-hosts': True,
     'nameserver-policy': {
-        '+.google.com': 'https://dns.cloudflare.com/dns-query',
-        '+.googleapis.com': 'https://dns.cloudflare.com/dns-query',
-        '+.googleapis.cn': 'https://dns.cloudflare.com/dns-query',
-        '+.googlevideo.com': 'https://dns.cloudflare.com/dns-query',
-        '+.gstatic.com': 'https://dns.cloudflare.com/dns-query',
-        '+.youtube.com': 'https://dns.cloudflare.com/dns-query',
-        '+.youtu.be': 'https://dns.cloudflare.com/dns-query',
-        '+.facebook.com': 'https://dns.cloudflare.com/dns-query',
-        '+.twitter.com': 'https://dns.cloudflare.com/dns-query',
-        '+.x.com': 'https://dns.cloudflare.com/dns-query',
-        '+.github.com': 'https://dns.cloudflare.com/dns-query',
-        '+.githubusercontent.com': 'https://dns.cloudflare.com/dns-query',
-        '+.openai.com': 'https://dns.cloudflare.com/dns-query',
-        '+.chatgpt.com': 'https://dns.cloudflare.com/dns-query',
-        '+.anthropic.com': 'https://dns.cloudflare.com/dns-query',
+        '+.google.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.googleapis.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.googleapis.cn': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.googlevideo.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.gstatic.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.youtube.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.youtu.be': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.facebook.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.twitter.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.x.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.github.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.githubusercontent.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.openai.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.chatgpt.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.anthropic.com': 'https://dns.cloudflare.com/dns-query#节点选择',
     },
     'proxy-server-nameserver': ['223.5.5.5', '119.29.29.29'],
     'nameserver': [
@@ -412,10 +511,10 @@ AIRPORT_DNS_CONFIG = {
         'tls://dns.alidns.com:853',
     ],
     'fallback': [
-        'https://dns.cloudflare.com/dns-query',
-        'https://dns.google/dns-query',
-        'tls://1.1.1.1:853',
-        'tls://8.8.8.8:853',
+        'https://dns.cloudflare.com/dns-query#节点选择',
+        'https://dns.google/dns-query#节点选择',
+        'tls://1.1.1.1:853#节点选择',
+        'tls://8.8.8.8:853#节点选择',
     ],
     'fallback-filter': {
         'geoip': True,
@@ -797,15 +896,31 @@ def clash_config(nodes, relay_chains=()):
     }
 
 
-def singbox_client_config(nodes):
+def singbox_client_config(nodes, relay_chains=()):
     """Build a standard sing-box client profile compatible with SFA / SFI / SFM / SFX."""
     outbounds = []
     names = []
+    by_name = {}
     for n in nodes:
         o = outbound(n, local=False)
         o['tag'] = n['name']
         outbounds.append(o)
         names.append(n['name'])
+        by_name[n['name']] = n
+    for chain in relay_chains or ():
+        front = chain.get('front')
+        exit_name = chain.get('exit')
+        if not front or not exit_name or front == exit_name:
+            continue
+        if front not in by_name or exit_name not in by_name:
+            continue
+        chain_name = valid_name(chain.get('name') or f'🔗 链式：{front} → {exit_name}')
+        if chain_name in by_name:
+            continue
+        ro = outbound(dict(by_name[exit_name], detour=front), local=False)
+        ro['tag'] = chain_name
+        outbounds.append(ro)
+        names.append(chain_name)
     selector_list = (['⚡ 自动优选最快'] + names + ['direct']) if len(names) > 1 else ((names + ['direct']) if names else ['direct'])
     groups = [{'type': 'selector', 'tag': '节点选择', 'outbounds': selector_list}]
     if len(names) > 1:
@@ -836,7 +951,7 @@ def singbox_client_config(nodes):
 
 def subscription_bundle(nodes, title='NodeLite', userinfo='', generation=None, relay_chains=()):
     yaml_text = json.dumps(clash_config(nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2) + '\n'
-    singbox_text = json.dumps(singbox_client_config(nodes), ensure_ascii=False, indent=2) + '\n'
+    singbox_text = json.dumps(singbox_client_config(nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2) + '\n'
     raw_links = '\n'.join(uri(n) for n in nodes) + ('\n' if nodes else '')
     b64_links = base64.b64encode(raw_links.strip().encode('utf-8')).decode('ascii')
     meta = {

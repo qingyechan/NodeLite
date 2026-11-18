@@ -122,8 +122,17 @@ def checked(args, **kw):
 
 def write_json(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
-    path.chmod(0o600)
+    payload = json.dumps(value, ensure_ascii=False, indent=2) + '\n'
+    fd, tmp_name = tempfile.mkstemp(prefix='.' + path.name + '.', dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(payload)
+        tmp_path.chmod(0o600)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def core_env():
@@ -216,10 +225,16 @@ def lock():
         yield
 
 
+RESERVED_PROXY_NAMES = {'节点选择', '⚡ 自动优选最快', '🛡️ 故障转移', '国内直连', 'DIRECT', 'REJECT', 'direct'}
+
+
 def check_ports(nodes, previous, extra_reserved_internal=(), extra_reserved_public=()):
     old = {(n['port'], PROTOCOLS[n['protocol']][1]) for n in previous}
     used, used_public, names = set(), set(), set()
-    reserved_names = {'节点选择', '⚡ 自动优选最快', 'DIRECT', 'REJECT'}
+    reserved_names = set(RESERVED_PROXY_NAMES)
+    ext_cfg = load_external_config()
+    ext_names = {n['name'] for n in ext_cfg.get('external_nodes') or []}
+    chain_names = {c.get('name') for c in ext_cfg.get('relay_chains') or [] if c.get('name')}
     ssh_info = detect_ssh_ports()
     ssh_port = ssh_info['internal']
     ssh_public = ssh_info['public']
@@ -238,8 +253,8 @@ def check_ports(nodes, previous, extra_reserved_internal=(), extra_reserved_publ
         pub_port = n.get('public_port') or n['port']
         key = (n['port'], transport)
         pub_key = (pub_port, transport)
-        if n['name'] in names or n['name'] in reserved_names:
-            raise ValueError(f"节点名称“{n['name']}”重复或为保留字；请修改“节点名称”一项。")
+        if n['name'] in names or n['name'] in reserved_names or n['name'] in ext_names or n['name'] in chain_names:
+            raise ValueError(f"节点名称“{n['name']}”重复、与外部/链式节点冲突或为保留字；请修改“节点名称”一项。")
         if key in used:
             raise ValueError(f"节点监听端口重复：{n['port']}/{transport.upper()} 已被本工具另一节点使用；请修改“节点内部端口”一项。")
         if pub_key in used_public:
@@ -404,7 +419,7 @@ def commit(nodes, test_ids=()):
             raise RuntimeError(f'变更失败；恢复旧服务也失败：{rollback_error}。请运行 nl doctor。') from error
         raise
     # Generated exports are snapshots, not a live subscription. Remove stale secrets.
-    for name in ('links.txt', 'subscription.txt', 'flclash.yaml'):
+    for name in ('links.txt', 'subscription.txt', 'flclash.yaml', 'singbox.json'):
         (ROOT/'exports'/name).unlink(missing_ok=True)
     # Keep one previous revision for recovery, bound disk usage.
     for entry in releases.iterdir():
@@ -827,8 +842,10 @@ def add_external_node(raw_uri, custom_name=''):
         ext_cfg = load_external_config()
         local_names = {n['name'] for n in load_state()['nodes']}
         ext_names = {n['name'] for n in ext_cfg['external_nodes']}
-        if node['name'] in local_names or node['name'] in ext_names:
-            raise ValueError(f"节点名称 {node['name']} 已存在，请指定一个不同的名称。")
+        chain_names = {c.get('name') for c in ext_cfg['relay_chains'] if c.get('name')}
+        if (node['name'] in local_names or node['name'] in ext_names
+                or node['name'] in chain_names or node['name'] in RESERVED_PROXY_NAMES):
+            raise ValueError(f"节点名称 {node['name']} 已存在或为保留策略组名称，请指定一个不同的名称。")
         ext_cfg['external_nodes'].append(node)
         save_external_config(ext_cfg, sync=True)
         return node
@@ -865,8 +882,9 @@ def add_relay_chain(front_name, exit_name, chain_name=''):
             raise ValueError(f'未找到落地节点：{exit_name}')
         resolved_name = valid_name(chain_name or f'🔗 链式：{front_name} → {exit_name}')
         existing_chain_names = {c.get('name') for c in ext_cfg['relay_chains']}
-        if resolved_name in available_names or resolved_name in existing_chain_names:
-            raise ValueError(f'链式节点名称 {resolved_name} 已存在。')
+        if (resolved_name in available_names or resolved_name in existing_chain_names
+                or resolved_name in RESERVED_PROXY_NAMES):
+            raise ValueError(f'链式节点名称 {resolved_name} 已存在或为保留策略组名称。')
         chain = {
             'id': 'chain-' + secrets.token_hex(5),
             'name': resolved_name,
@@ -1510,10 +1528,24 @@ def ensure_cloudflared():
 _CF_PROC = [None]
 
 
+def _kill_managed_cloudflared():
+    """Terminate only NodeLite's own cloudflared binary, never unrelated cloudflared tunnels."""
+    if _CF_PROC[0] is not None:
+        with contextlib.suppress(Exception):
+            _CF_PROC[0].terminate()
+    cf_bin = str(CLOUDFLARED)
+    my_pid = os.getpid()
+    for pid, _, cmd in _iter_proc_rss() or ():
+        if pid != my_pid and cf_bin in cmd:
+            with contextlib.suppress(OSError):
+                os.kill(pid, 15)
+
+
 def _maintain_cf_tunnel(sub_root, listen_port):
+    cfg_path = Path(sub_root)/'config.json'
     while True:
         try:
-            cfg = json.loads((Path(sub_root)/'config.json').read_text(encoding='utf-8'))
+            cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
         except Exception:
             cfg = {}
         if not cfg.get('cf_tunnel') or not CLOUDFLARED.is_file():
@@ -1543,11 +1575,12 @@ def _maintain_cf_tunnel(sub_root, listen_port):
                     if m:
                         domain = m.group(1).lower()
                         with contextlib.suppress(Exception):
-                            cur = load_sub_config()
+                            cur = json.loads(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
                             if cur.get('cf_domain') != domain:
                                 cur['cf_domain'] = domain
-                                write_json(Path(sub_root)/'config.json', cur)
-                                sync_subscription(manage_service=False)
+                                write_json(cfg_path, cur)
+                                if cfg_path == ROOT/'sub'/'config.json':
+                                    sync_subscription(manage_service=False)
         finally:
             _CF_PROC[0] = None
             with contextlib.suppress(Exception):
@@ -1573,7 +1606,7 @@ def enable_cf_tunnel(wait_seconds=25, mode='quick', cf_domain='', cf_token=''):
             cfg.update(cf_tunnel=False, cf_mode='cdn', cf_domain=domain, cf_token='')
             write_json(ROOT/'sub'/'config.json', cfg)
             sync_subscription(manage_service=False)
-        run(['pkill', '-f', 'cloudflared'])
+        _kill_managed_cloudflared()
         return dict(cfg, urls=subscription_urls(cfg))
 
     if memory_info().get('MemAvailable', 100) < 32:
@@ -1594,7 +1627,7 @@ def enable_cf_tunnel(wait_seconds=25, mode='quick', cf_domain='', cf_token=''):
         else:
             cfg.update(cf_tunnel=True, cf_mode='quick', cf_domain='', cf_token='')
             write_json(ROOT/'sub'/'config.json', cfg)
-    run(['pkill', '-f', 'cloudflared'])
+    _kill_managed_cloudflared()
     service_name('restart', check=True, name=SUB_SERVICE)
     if mode == 'named':
         cur = load_sub_config()
@@ -1609,6 +1642,7 @@ def enable_cf_tunnel(wait_seconds=25, mode='quick', cf_domain='', cf_token=''):
 
 
 def serve_subscription_forever(sub_root=None):
+    import gc
     import signal
     with contextlib.suppress(ValueError, RuntimeError):
         threading.stack_size(131072)
@@ -1619,9 +1653,6 @@ def serve_subscription_forever(sub_root=None):
                 _CF_PROC[0].terminate()
         raise SystemExit(0)
 
-    import gc
-    with contextlib.suppress(ValueError, RuntimeError):
-        threading.stack_size(131072)
     for sig in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(Exception):
             signal.signal(sig, _shutdown)
@@ -1815,6 +1846,7 @@ def self_update_from_github(installer_url=None, sha256_url=None, installer_path=
                     out_file = stage_dir/fname
                     out_file.write_bytes(src.read())
                     out_file.chmod(0o700 if fname == 'nodelite.py' else 0o600)
+                    compile(out_file.read_bytes(), fname, 'exec')
 
             new_ver = _read_script_version(stage_dir/'nodelite.py')
             if not new_ver:
@@ -1826,9 +1858,21 @@ def self_update_from_github(installer_url=None, sha256_url=None, installer_path=
                     shutil.copy2(dst, target_dir/(fname + '.bak'))
                 os.replace(stage_dir/fname, dst)
 
-            if (ROOT/'sub'/'config.json').exists():
+            sub_restarted = False
+            sub_skipped_quick = False
+            sub_cfg = load_sub_config()
+            if sub_cfg.get('enabled') or (ROOT/'sub'/'config.json').exists():
+                # Spawn a fresh subprocess so the newly updated protocols/runtime code regenerates the snapshot.
                 with contextlib.suppress(Exception):
-                    sync_subscription(manage_service=True)
+                    run([sys.executable, '-B', str(target_dir/'runtime.py'), 'sync-sub'], timeout=20)
+                if sub_cfg.get('enabled') and load_state()['nodes']:
+                    if sub_cfg.get('cf_mode') == 'quick':
+                        sub_skipped_quick = True
+                    else:
+                        with contextlib.suppress(Exception):
+                            if service_name('status', check=False, name=SUB_SERVICE):
+                                service_name('restart', check=False, name=SUB_SERVICE)
+                                sub_restarted = True
 
             return {
                 'updated': True,
@@ -1836,6 +1880,8 @@ def self_update_from_github(installer_url=None, sha256_url=None, installer_path=
                 'currentVersion': new_ver,
                 'sha256': actual_hash,
                 'installDir': str(target_dir),
+                'subRestarted': sub_restarted,
+                'subRestartSkippedQuickTunnel': sub_skipped_quick,
             }
 
 
@@ -2134,4 +2180,6 @@ if __name__ == '__main__':
         serve_subscription_forever()
     elif len(sys.argv) > 1 and sys.argv[1] == 'migrate-old':
         print(json.dumps(migrate_from_subprogress_lite(), ensure_ascii=False))
+    elif len(sys.argv) > 1 and sys.argv[1] == 'sync-sub':
+        print(json.dumps(sync_subscription(manage_service=True), ensure_ascii=False))
 

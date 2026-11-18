@@ -87,7 +87,7 @@ NAT 服务器通过服务商后台的“端口映射 / 端口转发”规则将�
 ```sh
 nl              # 打开中文数字交互菜单（输入 NL 同样有效）
 nl links        # 查看所有节点分享链接、外部汇总节点、链式代理与在线订阅地址
-nl export       # 在 /etc/nodelite/exports/ 导出 flclash.yaml、links.txt 与 subscription.txt
+nl export       # 在 /etc/nodelite/exports/ 导出 flclash.yaml、singbox.json、links.txt 与 subscription.txt
 nl external     # 查看或管理汇总的外部节点与 dialer-proxy 链式代理
 nl update       # 从 GitHub 拉取最新版本并校验 SHA-256 在线更新（不中断节点运行）
 nl test         # 对所有已配置节点执行本机真实协议连通性自测
