@@ -933,6 +933,120 @@ class V030OptimizationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, '外部/链式节点冲突'):
                     rt.check_ports([bad_ext_dup], [])
 
+    def test_airport_subscription_parser_and_relay_rescue_modes(self):
+        # 1. Base64 URI list + legacy ss:// + info-node filtering + keyword filtering
+        legacy_ss = 'ss://' + base64.b64encode(b'aes-256-gcm:secret@hk1.example.com:8388').decode() + '#%E9%A6%99%E6%B8%AF01'
+        trojan_ws = 'trojan://pass123@jp1.example.com:443?type=ws&path=%2Ftr&host=jp1.example.com&sni=jp1.example.com#%E6%97%A5%E6%9C%AC01'
+        info_node = 'ss://' + base64.b64encode(b'aes-128-gcm:x@127.0.0.1:1080').decode() + '#%E5%89%A9%E4%BD%99%E6%B5%81%E9%87%8F%EF%BC%9A99GB'
+        b64_sub = base64.b64encode('\n'.join([info_node, legacy_ss, trojan_ws]).encode('utf-8')).decode('ascii')
+
+        parsed_b64 = p.parse_subscription_content(b64_sub)
+        self.assertEqual([n['name'] for n in parsed_b64], ['香港01', '日本01'])
+        self.assertEqual(parsed_b64[0]['ss_method'], 'aes-256-gcm')
+        self.assertEqual(parsed_b64[1]['net'], 'ws')
+        self.assertEqual(p.outbound(parsed_b64[1])['transport']['path'], '/tr')
+
+        # 2. Clash YAML parser (mixed flow + indented block mappings + alpn list)
+        clash_yaml = (
+            "mixed-port: 7890\n"
+            "proxies:\n"
+            "  - {name: '新加坡01', type: ss, server: sg1.example.com, port: 443, cipher: chacha20-ietf-poly1305, password: 'pw1', udp: true}\n"
+            "  - name: '香港02'\n"
+            "    type: vless\n"
+            "    server: hk2.example.com\n"
+            "    port: 443\n"
+            "    uuid: 3d376695-dde3-4789-a98d-d139e28cc862\n"
+            "    tls: true\n"
+            "    network: ws\n"
+            "    alpn:\n"
+            "      - http/1.1\n"
+            "    ws-opts:\n"
+            "      path: /ws\n"
+            "      headers:\n"
+            "        Host: hk2.example.com\n"
+            "  - name: '套餐到期：2026-12-31'\n"
+            "    type: ss\n"
+            "    server: 0.0.0.0\n"
+            "    port: 1080\n"
+            "    cipher: aes-128-gcm\n"
+            "    password: x\n"
+            "proxy-groups:\n"
+            "  - name: Proxy\n"
+        )
+        parsed_yaml = p.parse_subscription_content(clash_yaml)
+        self.assertEqual([n['name'] for n in parsed_yaml], ['新加坡01', '香港02'])
+        self.assertEqual(parsed_yaml[1]['ws_path'], '/ws')
+        self.assertEqual(parsed_yaml[1]['alpn'], ['http/1.1'])
+        filtered = p.parse_subscription_content(clash_yaml, filter_pattern='香港')
+        self.assertEqual([n['name'] for n in filtered], ['香港02'])
+
+        # 3. Runtime add/refresh/remove airport relay in both inline and provider fallback modes
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)/'nodelite'
+            with patch.object(rt, 'ROOT', root), \
+                 patch.object(rt, 'CORE', Path(tmp)/'sing-box'), \
+                 patch.object(rt, 'checked', return_value=''), \
+                 patch.object(rt, 'service', return_value=True), \
+                 patch.object(rt, 'service_enabled', return_value=True), \
+                 patch.object(rt, 'enable_service'), \
+                 patch.object(rt, 'service_name', return_value=True), \
+                 patch.object(rt, 'enable_service_name'), \
+                 patch.object(rt, 'install_sub_unit'):
+                vps_vless = p.new_node('vless', '美西ZGO', '38.49.55.238', 10086, 37460, public_key='3zljW9ibrZOUBGnEjPqI2nKASUCkuBVnBR-rFuHsdxw', private_key='a'*43)
+                rt.commit([vps_vless])
+                rt.configure_subscription('38.49.55.238', rt.free_tcp_port(), 40187, start_daemon=False)
+
+                # Inline mode via mock fetcher
+                air1 = rt.add_airport_relay(
+                    'https://airport.example.com/sub?token=abc',
+                    name='便宜机场',
+                    mode='auto',
+                    fetch_fn=lambda u, ua: b64_sub,
+                )
+                self.assertEqual(air1['mode'], 'inline')
+                self.assertEqual(air1['node_count'], 2)
+
+                yaml_cfg = json.loads((root/'sub'/'current'/'clash.yaml').read_text(encoding='utf-8'))
+                sb_cfg = json.loads((root/'sub'/'current'/'singbox.json').read_text(encoding='utf-8'))
+                px_by_name = {px['name']: px for px in yaml_cfg['proxies']}
+                self.assertIn('🔗 便宜机场中转 → 美西ZGO', px_by_name)
+                self.assertEqual(px_by_name['🔗 便宜机场中转 → 美西ZGO']['dialer-proxy'], '🛫 便宜机场前置')
+                # Raw airport nodes stay inside front groups, NOT main auto-test exit group
+                main_select = next(g for g in yaml_cfg['proxy-groups'] if g['name'] == '节点选择')
+                self.assertIn('🔗 便宜机场中转 → 美西ZGO', main_select['proxies'])
+                self.assertNotIn('香港01', main_select['proxies'])
+
+                sb_by_tag = {o['tag']: o for o in sb_cfg['outbounds']}
+                self.assertIn('🔗 便宜机场中转 → 美西ZGO', sb_by_tag)
+                self.assertEqual(sb_by_tag['🔗 便宜机场中转 → 美西ZGO']['detour'], '🛫 便宜机场前置')
+
+                # Refresh updates nodes cleanly
+                refreshed = rt.refresh_airport_relay('便宜机场', fetch_fn=lambda u, ua: clash_yaml)
+                self.assertEqual(refreshed[0]['node_count'], 2)
+                yaml_refreshed = json.loads((root/'sub'/'current'/'clash.yaml').read_text(encoding='utf-8'))
+                self.assertIn('新加坡01', {px['name'] for px in yaml_refreshed['proxies']})
+
+                # Auto fallback to proxy-providers when VPS fetch fails (e.g. WAF blocks datacenter IP)
+                rt.remove_airport_relay('便宜机场')
+                air2 = rt.add_airport_relay(
+                    'https://cf-waf-airport.example.com/sub?t=123',
+                    name='WAF机场',
+                    mode='auto',
+                    filter_pattern='香港|日本',
+                    fetch_fn=lambda u, ua: (_ for _ in ()).throw(RuntimeError('HTTP 403')),
+                )
+                self.assertEqual(air2['mode'], 'provider')
+                self.assertEqual(air2['node_count'], 0)
+                yaml_prov = json.loads((root/'sub'/'current'/'clash.yaml').read_text(encoding='utf-8'))
+                sb_prov = json.loads((root/'sub'/'current'/'singbox.json').read_text(encoding='utf-8'))
+                self.assertIn('proxy-providers', yaml_prov)
+                prov_obj = next(iter(yaml_prov['proxy-providers'].values()))
+                self.assertEqual(prov_obj['url'], 'https://cf-waf-airport.example.com/sub?t=123')
+                self.assertEqual(prov_obj['filter'], '香港|日本')
+                self.assertIn('🔗 WAF机场中转 → 美西ZGO', {px['name'] for px in yaml_prov['proxies']})
+                # Sing-box gracefully skips provider-only relay with no parsed nodes (no dangling detour)
+                self.assertNotIn('🔗 WAF机场中转 → 美西ZGO', {o['tag'] for o in sb_prov['outbounds']})
+
 
 if __name__ == '__main__':
     unittest.main()

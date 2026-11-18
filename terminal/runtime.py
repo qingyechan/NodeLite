@@ -34,6 +34,7 @@ from protocols import (
     new_token,
     outbound,
     parse_node_uri,
+    parse_subscription_content,
     server_config,
     subscription_bundle,
     subscription_urls,
@@ -43,6 +44,7 @@ from protocols import (
     valid_sni,
     valid_ssh_port,
     valid_sub_host,
+    valid_sub_url,
     valid_token,
 )
 
@@ -235,6 +237,10 @@ def check_ports(nodes, previous, extra_reserved_internal=(), extra_reserved_publ
     ext_cfg = load_external_config()
     ext_names = {n['name'] for n in ext_cfg.get('external_nodes') or []}
     chain_names = {c.get('name') for c in ext_cfg.get('relay_chains') or [] if c.get('name')}
+    for air in ext_cfg.get('airport_relays') or []:
+        aname = air.get('name')
+        if aname:
+            reserved_names.update({aname, f'🛫 {aname}前置', f'⚡ {aname}测速'})
     ssh_info = detect_ssh_ports()
     ssh_port = ssh_info['internal']
     ssh_public = ssh_info['public']
@@ -790,10 +796,11 @@ def load_external_config():
             return {
                 'external_nodes': list(data.get('external_nodes') or []),
                 'relay_chains': list(data.get('relay_chains') or []),
+                'airport_relays': list(data.get('airport_relays') or []),
             }
     except (OSError, ValueError):
         pass
-    return {'external_nodes': [], 'relay_chains': []}
+    return {'external_nodes': [], 'relay_chains': [], 'airport_relays': []}
 
 
 def save_external_config(data, sync=True):
@@ -803,11 +810,145 @@ def save_external_config(data, sync=True):
         'schema': 1,
         'external_nodes': list(data.get('external_nodes') or []),
         'relay_chains': list(data.get('relay_chains') or []),
+        'airport_relays': list(data.get('airport_relays') or []),
     }
     write_json(sub_root/'external.json', payload)
     if sync and (sub_root/'config.json').exists():
         sync_subscription(manage_service=True)
     return payload
+
+
+def mask_sub_url(url):
+    text = str(url or '').strip()
+    try:
+        sp = urlsplit(text)
+        if not sp.scheme or not sp.netloc:
+            return text
+        path = sp.path or ''
+        if len(path) > 16:
+            path = path[:10] + '…' + path[-4:]
+        suffix = '?…' if sp.query else ''
+        return f'{sp.scheme}://{sp.netloc}{path}{suffix}'
+    except Exception:
+        return text
+
+
+def _fetch_subscription_text(url, user_agent='v2rayN/6.45', timeout=15):
+    r = run([
+        'curl', '-fsSL', '--proto', '=http,https', '--max-redirs', '5',
+        '--connect-timeout', '10', '--max-time', str(int(timeout)),
+        '-A', user_agent, url,
+    ], timeout=timeout + 5)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or f'curl exit {r.returncode}').strip()[-400:])
+    return r.stdout
+
+
+def fetch_airport_nodes(url, filter_pattern='', fetch_fn=None):
+    """Fetch and parse a third-party airport subscription URL using standard library / curl."""
+    url = valid_sub_url(url)
+    fetcher = fetch_fn or _fetch_subscription_text
+    last_err = ''
+    for ua in ('v2rayN/6.45', 'ClashMeta/1.18.0'):
+        try:
+            body = fetcher(url, ua)
+        except Exception as err:
+            last_err = str(err)
+            continue
+        nodes = parse_subscription_content(body, filter_pattern=filter_pattern)
+        if nodes:
+            return nodes
+        last_err = '订阅返回内容中未解析到支持的节点（VLESS / VMess / Trojan / SS / HY2 / TUIC）'
+    raise RuntimeError(last_err or '拉取机场订阅失败')
+
+
+def add_airport_relay(url, name='机场', mode='auto', filter_pattern='', target_ids=(), fetch_fn=None, pre_parsed=None):
+    """Configure a third-party airport subscription as front relay to reach local VPS nodes."""
+    if mode not in ('auto', 'inline', 'provider'):
+        raise ValueError('中转模式仅支持 auto、inline 或 provider')
+    url = valid_sub_url(url)
+    clean_name = valid_name(name or '机场')
+    if clean_name in RESERVED_PROXY_NAMES:
+        raise ValueError(f'名称“{clean_name}”为保留策略组名称，请换一个名称。')
+
+    with lock():
+        ext_cfg = load_external_config()
+        if any(a.get('name') == clean_name for a in ext_cfg.get('airport_relays') or []):
+            raise ValueError(f'已存在名为“{clean_name}”的机场中转配置，请先删除或改用其他名称。')
+
+        parsed_nodes = list(pre_parsed) if pre_parsed is not None else []
+        fetch_error = ''
+        if pre_parsed is None and mode in ('auto', 'inline', 'provider'):
+            try:
+                parsed_nodes = fetch_airport_nodes(url, filter_pattern=filter_pattern, fetch_fn=fetch_fn)
+            except Exception as err:
+                fetch_error = str(err)
+                if mode == 'inline':
+                    raise RuntimeError(f'无法从 VPS 拉取并解析该机场订阅：{fetch_error}') from err
+        if mode == 'inline' and not parsed_nodes:
+            raise RuntimeError('未能从该机场订阅解析到可用节点。')
+
+        resolved_mode = mode
+        if mode == 'auto':
+            resolved_mode = 'inline' if parsed_nodes else 'provider'
+
+        entry = {
+            'id': 'air-' + secrets.token_hex(5),
+            'name': clean_name,
+            'url': url,
+            'mode': resolved_mode,
+            'filter_pattern': str(filter_pattern or '').strip(),
+            'target_ids': list(target_ids or ()),
+            'nodes': parsed_nodes,
+            'node_count': len(parsed_nodes),
+            'fetch_error': fetch_error,
+            'updated_at': int(time.time()),
+        }
+        ext_cfg['airport_relays'].append(entry)
+        save_external_config(ext_cfg, sync=True)
+        return entry
+
+
+def refresh_airport_relay(relay_id_or_name=None, fetch_fn=None):
+    """Re-fetch and update nodes for one or all configured airport relays."""
+    with lock():
+        ext_cfg = load_external_config()
+        relays = ext_cfg.get('airport_relays') or []
+        if not relays:
+            raise ValueError('尚未添加任何机场订阅中转。')
+        updated_list = []
+        found = False
+        for air in relays:
+            if relay_id_or_name and air.get('id') != relay_id_or_name and air.get('name') != relay_id_or_name:
+                continue
+            found = True
+            try:
+                nodes = fetch_airport_nodes(air['url'], filter_pattern=air.get('filter_pattern', ''), fetch_fn=fetch_fn)
+                air['nodes'] = nodes
+                air['node_count'] = len(nodes)
+                air['fetch_error'] = ''
+                air['updated_at'] = int(time.time())
+            except Exception as err:
+                air['fetch_error'] = str(err)
+                if air.get('mode') == 'inline' and not air.get('nodes'):
+                    raise RuntimeError(f"刷新机场“{air.get('name')}”失败：{err}") from err
+            updated_list.append(air)
+        if relay_id_or_name and not found:
+            raise ValueError(f'未找到指定的机场中转：{relay_id_or_name}')
+        save_external_config(ext_cfg, sync=True)
+        return updated_list
+
+
+def remove_airport_relay(relay_id_or_name):
+    with lock():
+        ext_cfg = load_external_config()
+        relays = ext_cfg.get('airport_relays') or []
+        target = next((a for a in relays if a.get('id') == relay_id_or_name or a.get('name') == relay_id_or_name), None)
+        if not target:
+            raise ValueError('未找到指定的机场订阅中转。')
+        ext_cfg['airport_relays'] = [a for a in relays if a.get('id') != target['id']]
+        save_external_config(ext_cfg, sync=True)
+        return target
 
 
 def effective_subscription_nodes(nodes=None, sub_cfg=None, ext_cfg=None):
@@ -915,12 +1056,15 @@ def sync_subscription(nodes=None, manage_service=True):
         return None
     if nodes is None:
         nodes = load_state()['nodes']
-    effective_nodes, relay_chains = effective_subscription_nodes(nodes=nodes, sub_cfg=cfg)
+    ext_cfg = load_external_config()
+    effective_nodes, relay_chains = effective_subscription_nodes(nodes=nodes, sub_cfg=cfg, ext_cfg=ext_cfg)
     bundle = subscription_bundle(
         effective_nodes,
         title=cfg.get('title', 'NodeLite'),
         userinfo=cfg.get('userinfo') or _billing_userinfo(),
         relay_chains=relay_chains,
+        airport_relays=ext_cfg.get('airport_relays') or (),
+        local_nodes=nodes,
     )
     releases = sub_root/'releases'
     releases.mkdir(mode=0o700, parents=True, exist_ok=True)

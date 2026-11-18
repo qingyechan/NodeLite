@@ -23,6 +23,7 @@ from protocols import (
     valid_sni,
     valid_ssh_port,
     valid_sub_host,
+    valid_sub_url,
 )
 
 VERSION = '0.3.0'
@@ -230,6 +231,7 @@ def show_links():
     ext_cfg = rt.load_external_config()
     ext_nodes = ext_cfg.get('external_nodes') or []
     relay_chains = ext_cfg.get('relay_chains') or []
+    airport_relays = ext_cfg.get('airport_relays') or []
     if not nodes and not ext_nodes:
         print('尚无节点；选择“创建节点”。')
         return
@@ -255,6 +257,11 @@ def show_links():
         print('\n【已配置的链式落地代理 (dialer-proxy)】')
         for chain in relay_chains:
             print(f"  - {chain['name']}：前置入口 [{chain['front']}] → 落地节点 [{chain['exit']}]")
+    if airport_relays:
+        print('\n【已配置的机场订阅中转前置（连接本机 VPS 落地）】')
+        for air in airport_relays:
+            mode_txt = 'Clash proxy-providers 实时拉取' if air.get('mode') == 'provider' else f"本机解析写入（{air.get('node_count', len(air.get('nodes') or []))} 个节点）"
+            print(f"  - {air['name']} | {mode_txt} | {rt.mask_sub_url(air.get('url'))}")
     if sub_cfg.get('enabled'):
         urls = subscription_urls(sub_cfg)
         cf_mode = sub_cfg.get('cf_mode', '')
@@ -268,7 +275,10 @@ def show_links():
 
 
 def exports():
-    eff_nodes, relay_chains = rt.effective_subscription_nodes()
+    local_nodes = rt.load_state()['nodes']
+    ext_cfg = rt.load_external_config()
+    eff_nodes, relay_chains = rt.effective_subscription_nodes(nodes=local_nodes, ext_cfg=ext_cfg)
+    airport_relays = ext_cfg.get('airport_relays') or []
     if not eff_nodes:
         raise ValueError('没有可导出的节点。')
     directory = rt.ROOT/'exports'
@@ -277,8 +287,8 @@ def exports():
     files = [
         ('links.txt', links),
         ('subscription.txt', base64.b64encode(links.encode()).decode()),
-        ('flclash.yaml', json.dumps(clash_config(eff_nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2)),
-        ('singbox.json', json.dumps(singbox_client_config(eff_nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2)),
+        ('flclash.yaml', json.dumps(clash_config(eff_nodes, relay_chains=relay_chains, airport_relays=airport_relays, local_nodes=local_nodes), ensure_ascii=False, indent=2)),
+        ('singbox.json', json.dumps(singbox_client_config(eff_nodes, relay_chains=relay_chains, airport_relays=airport_relays, local_nodes=local_nodes), ensure_ascii=False, indent=2)),
     ]
     for name, data in files:
         path = directory/name
@@ -331,14 +341,23 @@ def subscription_menu():
     else:
         print('\n当前未开启公网订阅 URL（开启后会运行一个轻量标准库订阅服务，随节点增删改名自动同步）。')
 
+    ext_cfg = rt.load_external_config()
+    air_relays = ext_cfg.get('airport_relays') or []
+    if air_relays:
+        print('已配置机场订阅中转前置：' + '、'.join(a['name'] for a in air_relays))
+
     print('\n  1. 开启 / 修改公网订阅端口与 HTTPS 设置（保留已有隧道配置）\n'
-          '  2. 配置【永久不变】的 Cloudflare 固定命名隧道或 CDN 域名（推荐长期使用）\n'
+          '  2. 配置【永久不变】的 Cloudflare 固定命名隧道或 CDN 域名（免费兜底，推荐长期使用）\n'
           '  3. 开启免域名【临时】Cloudflare 隧道（*.trycloudflare.com，重启后地址会变化）\n'
           '  4. 重置订阅访问令牌（所有旧令牌与历史迁移令牌立即 404 失效）\n'
           '  5. 关闭公网订阅服务（仅使用文件导出）\n'
+          '  6. 使用【第三方机场订阅】中转连接本机 VPS（替代 CF 免费限速 IP，速度更快）\n'
           '  0. 返回主菜单')
     choice = ask('选择操作', '1' if not cfg.get('enabled') else '0')
     if choice == '0':
+        return
+    if choice == '6':
+        add_airport_relay_flow()
         return
     if choice == '4':
         if ask('重置后已分享的旧订阅 URL 将永久 404 失效，输入 yes 确认', 'no') != 'yes':
@@ -493,38 +512,133 @@ def rollback_menu():
     print(f'已恢复上一版配置（共 {len(restored)} 个节点），并已同步在线订阅。')
 
 
+def add_airport_relay_flow():
+    print('\n【使用第三方机场订阅链接作为前置中转，连接本机 VPS】')
+    print('  适用场景：VPS IP 被墙或直连丢包，且不想局限于免费的 Cloudflare 限速节点。')
+    print('  工作方式：客户端先连你的机场节点，再经机场加密转发至本机 VPS 落地（保留 VPS 原生 IP）。')
+    print('  客户端支持：FlClash / Clash Verge / Mihomo（dialer-proxy）以及 Sing-box（detour）。')
+    url = valid_sub_url(ask('粘贴机场订阅链接 (http:// 或 https://)'))
+    air_name = valid_name(ask('给该机场中转取个短名称（用于策略组与节点前缀）', '机场'))
+    flt = ask('可选：节点关键词过滤（如 香港|日本|新加坡，留空保留全部可用节点）', '')
+
+    local_nodes = rt.load_state()['nodes']
+    target_ids = []
+    if len(local_nodes) > 1:
+        print('\n选择要通过该机场中转连接的本机 VPS 节点：')
+        print('  0. 全部本机节点（推荐，后续新增节点也自动包含）')
+        for idx, n in enumerate(local_nodes, 1):
+            print(f"  {idx}. {n['name']} ({n['protocol']} | 公网 {n['public_port']})")
+        sel = int(ask('输入编号', '0'))
+        if sel < 0 or sel > len(local_nodes):
+            raise ValueError('节点编号超出范围。')
+        if sel > 0:
+            target_ids = [local_nodes[sel - 1]['id']]
+    elif not local_nodes:
+        print('提示：当前本机尚未创建节点，已先保存机场中转；创建第一个本机节点后将自动生成中转链。')
+
+    print('正在尝试从 VPS 拉取并解析机场订阅……')
+    parsed = None
+    fetch_err = ''
+    try:
+        parsed = rt.fetch_airport_nodes(url, filter_pattern=flt)
+    except Exception as err:
+        fetch_err = str(err)
+
+    if parsed:
+        print(f'成功解析 {len(parsed)} 个可用机场节点（已自动过滤剩余流量、到期时间等提示项）。')
+        print('选择中转配置方式：\n'
+              '  1. 由 VPS 解析写入订阅（推荐：同时兼容 FlClash 与 Sing-box，且机场域名在国内被屏蔽时也能正常连接）\n'
+              '  2. Clash proxy-providers 客户端实时拉取（仅 Clash/FlClash/Mihomo，机场更换节点时客户端自动更新）')
+        m_choice = ask('选择 1 或 2', '1')
+        if m_choice not in ('1', '2'):
+            raise ValueError('请输入 1 或 2。')
+        mode = 'provider' if m_choice == '2' else 'inline'
+        saved = rt.add_airport_relay(
+            url, name=air_name, mode=mode, filter_pattern=flt,
+            target_ids=target_ids, pre_parsed=parsed,
+        )
+    else:
+        print(f'VPS 直接拉取失败（{fetch_err}）。这通常是因为机场拦截了机房 IP。')
+        if ask('是否改用 Clash proxy-providers 模式保存（由你本地的 FlClash / Clash Verge 直接拉取机场订阅并中转连接 VPS）？(yes/no)', 'yes') != 'yes':
+            raise RuntimeError('已取消添加机场订阅中转。')
+        saved = rt.add_airport_relay(
+            url, name=air_name, mode='provider', filter_pattern=flt,
+            target_ids=target_ids, pre_parsed=[],
+        )
+
+    clear_exports()
+    mode_desc = 'Clash proxy-providers 客户端实时同步' if saved['mode'] == 'provider' else f"本机解析写入（{saved['node_count']} 个节点）"
+    print(f"\n已添加机场订阅中转：{saved['name']} | 模式：{mode_desc}")
+    print(f"使用方式：刷新客户端订阅（或选菜单 3 导出 flclash.yaml / singbox.json），在「节点选择」中选择“🔗 {saved['name']}中转 → ...”，并在「🛫 {saved['name']}前置」切换机场地区或保持自动测速。")
+
+
 def external_nodes_menu():
     ext_cfg = rt.load_external_config()
     ext_nodes = ext_cfg.get('external_nodes') or []
     chains = ext_cfg.get('relay_chains') or []
-    print('\n【多台 VPS 聚合进同一个订阅 URL + 链式落地 (dialer-proxy)】')
+    air_relays = ext_cfg.get('airport_relays') or []
+    print('\n【中转救援与多机聚合（机场订阅中转 / 其他 VPS 节点 / 链式落地）】')
+    if air_relays:
+        print('已配置的机场订阅中转（连接本机 VPS 落地）：')
+        for idx, a in enumerate(air_relays, 1):
+            mode_txt = 'proxy-providers 实时拉取' if a.get('mode') == 'provider' else f"本机解析 {a.get('node_count', len(a.get('nodes') or []))} 节点"
+            flt_txt = f" | 过滤：{a['filter_pattern']}" if a.get('filter_pattern') else ''
+            print(f"  {idx}. {a['name']} | {mode_txt}{flt_txt} | {rt.mask_sub_url(a.get('url'))}")
+    else:
+        print('当前尚未配置机场订阅中转。')
     if ext_nodes:
         print('已添加的其他 VPS 外部节点：')
         for idx, n in enumerate(ext_nodes, 1):
             print(f"  {idx}. {n['name']} | {n['protocol']} | {n['host']}:{n['public_port']}")
-    else:
-        print('当前尚未添加其他 VPS 的外部节点。')
     if chains:
-        print('已配置的链式落地代理 (dialer-proxy)：')
+        print('已配置的单节点链式落地代理 (dialer-proxy)：')
         for idx, c in enumerate(chains, 1):
             print(f"  {idx}. {c['name']}：前置入口 [{c['front']}] → 落地节点 [{c['exit']}]")
 
-    print('\n  1. 粘贴添加另一台 VPS 的单节点链接（合并到当前订阅 URL）\n'
-          '  2. 创建「前置入口节点 → 落地节点」链式代理（dialer-proxy）\n'
-          '  3. 删除一个已添加的外部节点\n'
-          '  4. 删除一条链式落地代理\n'
+    print('\n  1. 添加「机场订阅链接」作为前置中转，连接本机 VPS（被墙救援 / 提速推荐）\n'
+          '  2. 刷新已添加的机场订阅节点（重新拉取机场最新节点）\n'
+          '  3. 删除一条机场订阅中转\n'
+          '  4. 粘贴添加另一台 VPS 的单节点链接（合并到当前订阅 URL）\n'
+          '  5. 创建「前置入口节点 → 落地节点」单节点链式代理（dialer-proxy / detour）\n'
+          '  6. 删除一个已添加的外部节点\n'
+          '  7. 删除一条单节点链式落地代理\n'
           '  0. 返回主菜单')
-    choice = ask('选择操作', '1' if not ext_nodes else '0')
+    choice = ask('选择操作', '1' if (not air_relays and not ext_nodes) else '0')
     if choice == '0':
         return
     if choice == '1':
+        add_airport_relay_flow()
+        return
+    if choice == '2':
+        if not air_relays:
+            raise ValueError('当前没有已添加的机场订阅中转。')
+        updated = rt.refresh_airport_relay()
+        clear_exports()
+        for a in updated:
+            status = f"成功（{a.get('node_count', 0)} 个节点）" if not a.get('fetch_error') else f"拉取失败（{a['fetch_error']}）"
+            print(f"  - {a['name']}：{status}")
+        print('在线订阅已同步更新。')
+        return
+    if choice == '3':
+        if not air_relays:
+            raise ValueError('当前没有可删除的机场订阅中转。')
+        for idx, a in enumerate(air_relays, 1):
+            print(f"  {idx}. {a['name']} ({rt.mask_sub_url(a.get('url'))})")
+        idx = int(ask('选择要删除的机场中转编号', '1'))
+        if not 1 <= idx <= len(air_relays):
+            raise ValueError('编号超出范围。')
+        removed = rt.remove_airport_relay(air_relays[idx - 1]['id'])
+        clear_exports()
+        print(f"已移除机场订阅中转：{removed['name']}，在线订阅已自动同步。")
+        return
+    if choice == '4':
         raw = ask('粘贴另一台 VPS 的单节点分享链接 (vless/vmess/hysteria2/hy2/tuic/trojan/ss)')
         cname = ask('自定义显示名称（直接回车则使用链接自带名称）', '')
         added = rt.add_external_node(raw, custom_name=cname)
         clear_exports()
         print(f"已聚合外部节点：{added['name']} ({added['protocol']} | {added['host']}:{added['public_port']})，在线订阅已自动同步！")
         return
-    if choice == '2':
+    if choice == '5':
         all_nodes, _ = rt.effective_subscription_nodes(ext_cfg=ext_cfg)
         if len(all_nodes) < 2:
             raise ValueError('至少需要 2 个可用节点（本机节点 + 外部节点）才能创建链式落地代理。')
@@ -544,7 +658,7 @@ def external_nodes_menu():
         clear_exports()
         print(f"已创建链式落地节点：{chain['name']}（入口 {chain['front']} → 落地 {chain['exit']}），FlClash 刷新订阅即可使用！")
         return
-    if choice == '3':
+    if choice == '6':
         if not ext_nodes:
             raise ValueError('当前没有可删除的外部节点。')
         for idx, n in enumerate(ext_nodes, 1):
@@ -556,7 +670,7 @@ def external_nodes_menu():
         clear_exports()
         print(f"已移除外部节点：{removed['name']}，在线订阅已自动同步。")
         return
-    if choice == '4':
+    if choice == '7':
         if not chains:
             raise ValueError('当前没有可删除的链式代理。')
         for idx, c in enumerate(chains, 1):
@@ -568,7 +682,7 @@ def external_nodes_menu():
         clear_exports()
         print(f"已移除链式代理：{removed['name']}，在线订阅已自动同步。")
         return
-    raise ValueError('请输入 0–4。')
+    raise ValueError('请输入 0–7。')
 
 
 def self_update_menu():
@@ -627,6 +741,15 @@ def doctor():
     else:
         print('在线订阅：未开启（可在主菜单选 4 开启自动更新 URL）')
 
+    ext_cfg = rt.load_external_config()
+    air_relays = ext_cfg.get('airport_relays') or []
+    if air_relays:
+        air_desc = '、'.join(
+            f"{a['name']}({'proxy-providers' if a.get('mode') == 'provider' else str(a.get('node_count', len(a.get('nodes') or []))) + '节点'})"
+            for a in air_relays
+        )
+        print('机场订阅中转：' + air_desc)
+
     if diag['legacyServices']:
         active_leg = [f"{x['name']}({'本工具旧版' if x.get('ownership')=='subprogress' else '第三方'})" for x in diag['legacyServices'] if x['active'] or x['enabled']]
         if active_leg:
@@ -642,7 +765,7 @@ def doctor():
     print('  1. 内部自测失败       → 检查 VPS 出站网络、DNS 或 Reality 伪装域名。')
     print('  2. SSH 能直连，节点不通 → 核对商家后台 NAT 映射表（公网→内部端口是否填反/漏填）及云安全组。')
     print('  3. 内部自测通过、经海外代理连公网端口也通，但你电脑直连 SSH 与节点端口全部超时（即使 Ping 仍通）：')
-    print('     → 该 VPS 公网 IP 遭到运营商/跨境链路 TCP 阻断（俗称 IP 被墙 TCP）。配置与映射本身正常，需在商家后台更换 IP 或经中转连接。')
+    print('     → 该 VPS 公网 IP 遭到运营商/跨境链路 TCP 阻断（俗称 IP 被墙 TCP）。配置与映射本身正常，可在菜单 4 或 15 添加【机场订阅中转】或开启 Cloudflare 隧道恢复连接。')
     print('  4. UDP 节点（HY2/TUIC）不通 → 确认商家 NAT 映射及防火墙同时放行了 UDP，而非仅 TCP。')
 
 
@@ -735,7 +858,7 @@ def menu():
               '  1. 创建节点（三步引导：检测 → 填端口 → 自动优选最快 SNI 并自测出链）\n'
               '  2. 查看 / 复制分享链接与订阅地址（含多机聚合与验证状态）\n'
               '  3. 导出 FlClash / 通用配置文件（内置国内直连智能分流）\n'
-              '  4. 开启 / 管理公网自动更新订阅 URL（支持固定隧道/自有域名）\n'
+              '  4. 开启 / 管理公网自动更新订阅 URL 与被墙中转救援（CF 隧道 / 机场中转）\n'
               '  5. 自测节点能否代理访问网站\n'
               '  6. 查看状态 / 内存明细 / 证书到期 / 排查连接问题\n'
               '  7. 给节点改名（保留原连接凭据）\n'
@@ -746,7 +869,7 @@ def menu():
               '  12. 恢复上一版节点配置（回滚）\n'
               '  13. 重启 NodeLite 服务\n'
               '  14. 卸载 NodeLite 服务（保留备份）\n'
-              '  15. 添加 / 管理其他 VPS 外部节点与链式落地（dialer-proxy 多机聚合）\n'
+              '  15. 中转救援与多机聚合（机场订阅中转 / 其他 VPS 节点 / 链式落地）\n'
               '  16. 从 GitHub 一键在线更新 NodeLite（nl update，不中断节点）\n'
               '  0. 退出（节点继续运行，菜单不再占内存）')
         value = ask('输入数字', '0')
@@ -794,6 +917,10 @@ def main():
     parser.add_argument('--uri', default='')
     parser.add_argument('--front', default='')
     parser.add_argument('--exit', dest='exit_node', default='')
+    parser.add_argument('--airport-url', default='')
+    parser.add_argument('--airport-mode', choices=['auto', 'inline', 'provider'], default='auto')
+    parser.add_argument('--filter', dest='filter_pattern', default='')
+    parser.add_argument('--refresh-airport', nargs='?', const='*', default='')
     parser.add_argument('--remove', default='')
     parser.add_argument('--scheme', choices=['http', 'https'], default='http')
     parser.add_argument('--cert', default='')
@@ -863,10 +990,36 @@ def main():
     elif args.action == 'external':
         if args.remove:
             try:
-                res = rt.remove_external_node(args.remove)
+                res = rt.remove_airport_relay(args.remove)
             except ValueError:
-                res = rt.remove_relay_chain(args.remove)
-            print(json.dumps(res, ensure_ascii=False, indent=2))
+                try:
+                    res = rt.remove_external_node(args.remove)
+                except ValueError:
+                    res = rt.remove_relay_chain(args.remove)
+            out = {k: v for k, v in res.items() if k != 'nodes'} if isinstance(res, dict) else res
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+        elif args.airport_url:
+            target_ids = []
+            if args.node:
+                matched = next((n for n in rt.load_state()['nodes'] if n['id'] == args.node or n['name'] == args.node), None)
+                if not matched:
+                    raise ValueError(f'未找到指定的本机节点：{args.node}')
+                target_ids = [matched['id']]
+            res = rt.add_airport_relay(
+                args.airport_url,
+                name=args.name or '机场',
+                mode=args.airport_mode,
+                filter_pattern=args.filter_pattern,
+                target_ids=target_ids,
+            )
+            summary = {k: v for k, v in res.items() if k != 'nodes'}
+            summary['url'] = rt.mask_sub_url(res.get('url'))
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+        elif args.refresh_airport:
+            target = None if args.refresh_airport == '*' else args.refresh_airport
+            res_list = rt.refresh_airport_relay(target)
+            summaries = [{**{k: v for k, v in a.items() if k != 'nodes'}, 'url': rt.mask_sub_url(a.get('url'))} for a in res_list]
+            print(json.dumps(summaries, ensure_ascii=False, indent=2))
         elif args.uri:
             res = rt.add_external_node(args.uri, custom_name=args.name)
             print(json.dumps(res, ensure_ascii=False, indent=2))
@@ -874,7 +1027,12 @@ def main():
             res = rt.add_relay_chain(args.front, args.exit_node, chain_name=args.name)
             print(json.dumps(res, ensure_ascii=False, indent=2))
         else:
-            print(json.dumps(rt.load_external_config(), ensure_ascii=False, indent=2))
+            cfg = rt.load_external_config()
+            cfg['airport_relays'] = [
+                {**{k: v for k, v in a.items() if k != 'nodes'}, 'url': rt.mask_sub_url(a.get('url'))}
+                for a in cfg.get('airport_relays') or []
+            ]
+            print(json.dumps(cfg, ensure_ascii=False, indent=2))
     elif args.action == 'update':
         res = rt.self_update_from_github(installer_path=args.archive, sha256_text=args.sha256)
         print(json.dumps(res, ensure_ascii=False, indent=2))

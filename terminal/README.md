@@ -85,7 +85,7 @@ curl -fsSL https://raw.githubusercontent.com/qingyechan/NodeLite/main/dist/nodel
 
 - **菜单 `10`（梳理并清理旧版残留服务）**：自动检测历史遗留服务（如 `nodepilot-sing-box`、`subprogress-auto`、`subprogress-sub`、`nodepilot-subscription`）的运行状态、PID 与内存占用，先备份配置文件并提取旧订阅令牌，随后按确认结果停用对应旧服务。
 - **菜单 `11`（升级 / 校验 sing-box 核心）**：下载对应架构的核心压缩包并校验 SHA-256，替换前使用新核心校验现有配置文件，替换后对全部节点执行真实协议回环自测；若任一步骤异常则自动恢复备份核心。
-- **菜单 `15`（外部节点汇总与链式代理）**：支持解析并添加其他服务器的节点链接，或配置 `dialer-proxy` 前置中转与落地链式代理。
+- **菜单 `15`（中转救援与外部节点聚合）**：支持填入第三方机场订阅链接作为前置中转连接本机 VPS（支持 VPS 解析写入与 Clash `proxy-providers` 自动同步两种模式，用于被墙 IP 救援或提速），也支持添加其他服务器单节点链接及 `dialer-proxy` / `detour` 链式代理。
 - **菜单 `16`（GitHub 在线更新）**：从官方仓库拉取最新 `nodelite.run` 与 `.sha256` 校验文件，校验通过后原子替换管理脚本。
 
 ---

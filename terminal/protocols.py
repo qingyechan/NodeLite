@@ -78,6 +78,16 @@ def valid_token(value):
     return value
 
 
+def valid_sub_url(value):
+    url = str(value or '').strip()
+    if not url or len(url) > 2048 or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        raise ValueError('订阅链接格式不正确：不能包含空格或换行，且长度不超过 2048 字符')
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() not in ('http', 'https') or not parsed.netloc:
+        raise ValueError('订阅链接必须以 http:// 或 https:// 开头并包含有效域名或 IP')
+    return url
+
+
 def new_token():
     return secrets.token_urlsafe(32)
 
@@ -165,8 +175,17 @@ def outbound(n, local=False):
     elif p in ('trojan', 'hysteria2', 'tuic'):
         o.update(password=n['password'], tls={'enabled': True, 'server_name': n['sni'],
                  'insecure': n.get('self_signed', True)})
+        if p == 'trojan':
+            net = (n.get('net') or 'tcp').lower()
+            if net == 'ws':
+                o['transport'] = {'type': 'ws', 'path': n.get('ws_path', '/'),
+                                  'headers': {'Host': n.get('ws_host') or n['sni']}}
+            elif net == 'grpc':
+                o['transport'] = {'type': 'grpc', 'service_name': n.get('service_name', '')}
         if p in ('hysteria2', 'tuic'):
             o['tls']['alpn'] = ['h3']
+        if p == 'hysteria2' and n.get('obfs') and n.get('obfs_password'):
+            o['obfs'] = {'type': n['obfs'], 'password': n['obfs_password']}
         if p == 'tuic':
             o.update(uuid=n['uuid'], congestion_control='cubic')
     elif p == 'ss2022':
@@ -242,6 +261,19 @@ def parse_node_uri(raw_uri, custom_name=None):
         )
         return node
 
+    if scheme == 'ss':
+        raw_body = text[len('ss://'):]
+        frag_name = ''
+        if '#' in raw_body:
+            raw_body, frag_part = raw_body.split('#', 1)
+            frag_name = unquote(frag_part).strip()
+        if '@' not in raw_body:
+            try:
+                decoded = _b64_decode_padded(raw_body.split('?', 1)[0]).decode('utf-8')
+                text = 'ss://' + decoded + (('#' + quote(frag_name, safe='')) if frag_name else '')
+            except Exception:
+                pass
+
     parsed = urlsplit(text)
     if not parsed.hostname or not parsed.port:
         raise ValueError('节点链接缺少服务器地址或端口')
@@ -290,10 +322,11 @@ def parse_node_uri(raw_uri, custom_name=None):
         password = unquote(parsed.username or '')
         if not password:
             raise ValueError(f'{proto} 节点链接缺少连接密码')
-        sni = q.get('sni') or q.get('peer') or 'www.microsoft.com'
+        sni = q.get('sni') or q.get('peer') or (host if not re.fullmatch(r'[0-9.:a-fA-F]+', host) else 'www.microsoft.com')
         insecure = q.get('insecure', q.get('allowInsecure', '1')) in ('1', 'true', 'True')
+        net = q.get('type', 'tcp').lower() if proto == 'trojan' else 'udp'
         name = valid_name(custom_name or frag_name or f'外部{proto.upper()}-{host}:{port}')
-        return dict(
+        node = dict(
             id='ext-' + secrets.token_hex(5),
             external=True,
             protocol=proto,
@@ -303,9 +336,17 @@ def parse_node_uri(raw_uri, custom_name=None):
             public_port=port,
             sni=sni,
             password=password,
+            net=net,
+            ws_path=q.get('path', '/'),
+            ws_host=q.get('host', ''),
+            service_name=q.get('serviceName', ''),
             self_signed=insecure,
             raw_uri=text if not custom_name else '',
         )
+        if proto == 'hysteria2' and q.get('obfs') and q.get('obfs-password'):
+            node['obfs'] = q['obfs']
+            node['obfs_password'] = q['obfs-password']
+        return node
 
     if scheme == 'tuic':
         user_uuid = str(uuid.UUID(unquote(parsed.username or '')))
@@ -332,7 +373,9 @@ def parse_node_uri(raw_uri, custom_name=None):
 
     if scheme == 'ss':
         raw_user = unquote(parsed.username or '')
-        if ':' in raw_user:
+        if parsed.password is not None:
+            method, ss_pass = raw_user, unquote(parsed.password)
+        elif ':' in raw_user:
             method, ss_pass = raw_user.split(':', 1)
         else:
             try:
@@ -415,8 +458,20 @@ def uri(n):
             q.update(congestion_control='cubic', alpn='h3', udp_relay_mode='native')
         elif p == 'hysteria2':
             q.update(alpn='h3')
+            if n.get('obfs') and n.get('obfs_password'):
+                q['obfs'] = n['obfs']
+                q['obfs-password'] = n['obfs_password']
         elif p == 'trojan':
-            q.update(security='tls', type='tcp', headerType='none')
+            net = (n.get('net') or 'tcp').lower()
+            q.update(security='tls', type=net)
+            if net == 'tcp':
+                q['headerType'] = 'none'
+            elif net == 'ws':
+                q['path'] = n.get('ws_path', '/')
+                if n.get('ws_host'):
+                    q['host'] = n['ws_host']
+            elif net == 'grpc' and n.get('service_name'):
+                q['serviceName'] = n['service_name']
         if n.get('self_signed', True):
             q['insecure'] = '1'
             q['allowInsecure'] = '1'
@@ -455,9 +510,18 @@ def clash_proxy(n):
     elif p in ('trojan', 'hysteria2', 'tuic'):
         o.update(password=n['password'], sni=n['sni'], **{'skip-cert-verify': n.get('self_signed', True)})
         if p == 'trojan':
-            o['network'] = 'tcp'
+            net = (n.get('net') or 'tcp').lower()
+            o['network'] = net
+            if net == 'ws':
+                o['ws-opts'] = {'path': n.get('ws_path', '/'),
+                                'headers': {'Host': n.get('ws_host') or n['sni']}}
+            elif net == 'grpc':
+                o['grpc-opts'] = {'grpc-service-name': n.get('service_name', '')}
         elif p == 'hysteria2':
             o['alpn'] = ['h3']
+            if n.get('obfs') and n.get('obfs_password'):
+                o['obfs'] = n['obfs']
+                o['obfs-password'] = n['obfs_password']
         elif p == 'tuic':
             o.update(uuid=n['uuid'], **{'congestion-controller': 'cubic', 'alpn': ['h3'], 'udp-relay-mode': 'native'})
     elif p == 'ss2022':
@@ -853,6 +917,505 @@ CHINA_DIRECT_RULES = (
 )
 
 
+_INFO_NODE_RE = re.compile(
+    r'剩余|流量|到期|过期|套餐|官网|重置|邀请|网址|公告|客服|订阅|地址|群组|频道|expire|traffic|reset|website',
+    re.IGNORECASE,
+)
+
+
+def _strip_yaml_comment(line):
+    in_sq = False
+    in_dq = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "'" and not in_dq:
+            if in_sq and i + 1 < len(line) and line[i + 1] == "'":
+                i += 2
+                continue
+            in_sq = not in_sq
+        elif ch == '"' and not in_sq:
+            if in_dq and i > 0 and line[i - 1] == '\\':
+                i += 1
+                continue
+            in_dq = not in_dq
+        elif ch == '#' and not in_sq and not in_dq and (i == 0 or line[i - 1].isspace()):
+            return line[:i].rstrip()
+        i += 1
+    return line.rstrip()
+
+
+def _parse_yaml_scalar(raw):
+    s = raw.strip()
+    if not s:
+        return ''
+    if len(s) >= 2 and s[0] == "'" and s[-1] == "'":
+        return s[1:-1].replace("''", "'")
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        inner = s[1:-1]
+        return inner.replace('\\"', '"').replace('\\\\', '\\')
+    low = s.lower()
+    if low == 'true':
+        return True
+    if low == 'false':
+        return False
+    if low in ('null', '~'):
+        return None
+    if re.fullmatch(r'-?\d+', s):
+        return int(s)
+    return s
+
+
+def _split_yaml_kv(text):
+    in_sq = False
+    in_dq = False
+    for i, ch in enumerate(text):
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+        elif ch == '"' and not in_sq and not (i > 0 and text[i - 1] == '\\'):
+            in_dq = not in_dq
+        elif ch == ':' and not in_sq and not in_dq:
+            if i + 1 == len(text) or text[i + 1].isspace():
+                return text[:i].strip().strip('"\''), text[i + 1:].strip()
+    return None, None
+
+
+def _parse_yaml_flow(text, pos=0):
+    n = len(text)
+
+    def skip_ws(p):
+        while p < n and text[p].isspace():
+            p += 1
+        return p
+
+    def read_token(p, stop_chars):
+        p = skip_ws(p)
+        if p >= n:
+            return '', p
+        if text[p] in ("'", '"'):
+            quote_ch = text[p]
+            start = p
+            p += 1
+            while p < n:
+                if quote_ch == "'" and text[p] == "'":
+                    if p + 1 < n and text[p + 1] == "'":
+                        p += 2
+                        continue
+                    p += 1
+                    break
+                if quote_ch == '"' and text[p] == '"' and text[p - 1] != '\\':
+                    p += 1
+                    break
+                p += 1
+            return _parse_yaml_scalar(text[start:p]), p
+        start = p
+        while p < n and text[p] not in stop_chars:
+            p += 1
+        return _parse_yaml_scalar(text[start:p]), p
+
+    def parse_val(p, stop_chars):
+        p = skip_ws(p)
+        if p >= n:
+            return '', p
+        if text[p] == '{':
+            p += 1
+            obj = {}
+            while p < n:
+                p = skip_ws(p)
+                if p < n and text[p] == '}':
+                    return obj, p + 1
+                key, p = read_token(p, ':}')
+                p = skip_ws(p)
+                if p < n and text[p] == ':':
+                    p += 1
+                val, p = parse_val(p, ',}')
+                if str(key) != '':
+                    obj[str(key)] = val
+                p = skip_ws(p)
+                if p < n and text[p] == ',':
+                    p += 1
+                    continue
+                if p < n and text[p] == '}':
+                    return obj, p + 1
+            return obj, p
+        if text[p] == '[':
+            p += 1
+            arr = []
+            while p < n:
+                p = skip_ws(p)
+                if p < n and text[p] == ']':
+                    return arr, p + 1
+                val, p = parse_val(p, ',]')
+                arr.append(val)
+                p = skip_ws(p)
+                if p < n and text[p] == ',':
+                    p += 1
+                    continue
+                if p < n and text[p] == ']':
+                    return arr, p + 1
+            return arr, p
+        return read_token(p, stop_chars)
+
+    val, _ = parse_val(pos, '')
+    return val
+
+
+def _parse_clash_yaml_proxies(text):
+    """Lightweight pure-Python parser for the `proxies:` section of Clash/Mihomo YAML configs."""
+    lines = text.splitlines()
+    in_proxies = False
+    items = []
+    cur_item = None
+    stack = []  # list of (indent, container)
+
+    def flush_cur():
+        nonlocal cur_item, stack
+        if isinstance(cur_item, dict) and cur_item:
+            items.append(cur_item)
+        cur_item = None
+        stack = []
+
+    for raw_line in lines:
+        cleaned = _strip_yaml_comment(raw_line)
+        if not cleaned.strip():
+            continue
+        indent = len(cleaned) - len(cleaned.lstrip(' '))
+        stripped = cleaned.strip()
+        if not in_proxies:
+            if indent == 0 and re.match(r'^proxies\s*:\s*(\[\s*\])?$', stripped):
+                if stripped.endswith('[]'):
+                    return []
+                in_proxies = True
+            continue
+        if indent == 0 and not stripped.startswith('-'):
+            break
+
+        if stripped.startswith('- ') or stripped == '-':
+            rest = stripped[1:].strip()
+            if not stack or indent <= stack[0][0]:
+                flush_cur()
+                if rest.startswith('{'):
+                    parsed = _parse_yaml_flow(rest)
+                    if isinstance(parsed, dict):
+                        items.append(parsed)
+                    continue
+                cur_item = {}
+                stack = [(indent, cur_item)]
+                if rest:
+                    k, v = _split_yaml_kv(rest)
+                    if k is not None:
+                        if v.startswith('{') or v.startswith('['):
+                            cur_item[k] = _parse_yaml_flow(v)
+                        elif v == '':
+                            sub = {}
+                            cur_item[k] = sub
+                            stack.append((indent + 1, sub))
+                        else:
+                            cur_item[k] = _parse_yaml_scalar(v)
+                continue
+            # List item nested inside a block proxy (e.g. alpn: \n - h2)
+            while len(stack) > 1 and indent < stack[-1][0]:
+                stack.pop()
+            parent = stack[-1][1]
+            if isinstance(parent, list):
+                parent.append(_parse_yaml_scalar(rest))
+            elif isinstance(parent, dict) and len(stack) >= 2:
+                # Parent was initialized as empty dict on `alpn:` before seeing `- item`
+                grand = stack[-2][1]
+                for gk, gv in list(grand.items()):
+                    if gv is parent:
+                        new_list = [_parse_yaml_scalar(rest)]
+                        grand[gk] = new_list
+                        stack[-1] = (stack[-1][0], new_list)
+                        break
+            continue
+
+        if cur_item is None:
+            continue
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+        target = stack[-1][1]
+        if not isinstance(target, dict):
+            continue
+        k, v = _split_yaml_kv(stripped)
+        if k is None:
+            continue
+        if v == '':
+            sub = {}
+            target[k] = sub
+            stack.append((indent, sub))
+        elif v.startswith('{') or v.startswith('['):
+            target[k] = _parse_yaml_flow(v)
+        else:
+            target[k] = _parse_yaml_scalar(v)
+
+    flush_cur()
+    return items
+
+
+def _clash_dict_to_node(item):
+    if not isinstance(item, dict):
+        return None
+    ptype = str(item.get('type') or '').strip().lower()
+    proto_map = {
+        'vless': 'vless',
+        'vmess': 'vmess',
+        'trojan': 'trojan',
+        'ss': 'ss2022',
+        'hysteria2': 'hysteria2',
+        'hy2': 'hysteria2',
+        'tuic': 'tuic',
+    }
+    proto = proto_map.get(ptype)
+    if not proto:
+        return None
+    raw_server = str(item.get('server') or '').strip()
+    raw_port = item.get('port')
+    if not raw_port and item.get('ports'):
+        raw_port = str(item.get('ports')).split(',')[0].split('-')[0].strip()
+    if not raw_server or not raw_port:
+        return None
+    host = valid_sub_host(raw_server)
+    port = valid_port(raw_port)
+    name = valid_name(item.get('name') or f'机场-{host}:{port}')
+    is_domain = not re.fullmatch(r'[0-9.:a-fA-F]+', host)
+    default_sni = host if is_domain else 'www.microsoft.com'
+    net = str(item.get('network') or ('udp' if proto in ('hysteria2', 'tuic') else 'tcp')).lower()
+    ws_opts = item.get('ws-opts') if isinstance(item.get('ws-opts'), dict) else {}
+    ws_headers = ws_opts.get('headers') if isinstance(ws_opts.get('headers'), dict) else {}
+    grpc_opts = item.get('grpc-opts') if isinstance(item.get('grpc-opts'), dict) else {}
+    reality_opts = item.get('reality-opts') if isinstance(item.get('reality-opts'), dict) else {}
+    insecure = bool(item.get('skip-cert-verify', False))
+    alpn = [str(x) for x in item.get('alpn', [])] if isinstance(item.get('alpn'), list) else []
+
+    if proto == 'vless':
+        user_uuid = str(uuid.UUID(str(item.get('uuid', ''))))
+        pbk = str(reality_opts.get('public-key') or '')
+        tls_on = bool(item.get('tls', False)) or bool(pbk)
+        sec = 'reality' if pbk else ('tls' if tls_on else 'none')
+        sni = str(item.get('servername') or item.get('sni') or default_sni)
+        return dict(
+            id='ext-' + secrets.token_hex(5),
+            external=True,
+            protocol='vless',
+            name=name,
+            host=host,
+            port=port,
+            public_port=port,
+            sni=sni,
+            uuid=user_uuid,
+            security=sec,
+            net=net,
+            flow=str(item.get('flow') or ''),
+            public_key=pbk,
+            short_id=str(reality_opts.get('short-id') or ''),
+            fp=str(item.get('client-fingerprint') or 'chrome'),
+            ws_path=str(ws_opts.get('path') or '/'),
+            ws_host=str(ws_headers.get('Host') or ws_headers.get('host') or ''),
+            service_name=str(grpc_opts.get('grpc-service-name') or ''),
+            alpn=alpn,
+            self_signed=insecure,
+        )
+    if proto == 'vmess':
+        user_uuid = str(uuid.UUID(str(item.get('uuid', ''))))
+        tls_on = bool(item.get('tls', False))
+        sni = str(item.get('servername') or item.get('sni') or ws_headers.get('Host') or default_sni)
+        return dict(
+            id='ext-' + secrets.token_hex(5),
+            external=True,
+            protocol='vmess',
+            name=name,
+            host=host,
+            port=port,
+            public_port=port,
+            sni=sni,
+            ws_host=str(ws_headers.get('Host') or ws_headers.get('host') or sni),
+            net=net,
+            scy=str(item.get('cipher') or 'auto'),
+            uuid=user_uuid,
+            ws_path=str(ws_opts.get('path') or '/'),
+            service_name=str(grpc_opts.get('grpc-service-name') or ''),
+            tls_enabled=tls_on,
+            self_signed=insecure,
+        )
+    if proto == 'ss2022':
+        method = str(item.get('cipher') or '').strip()
+        password = str(item.get('password') or '')
+        if not method or not password:
+            return None
+        return dict(
+            id='ext-' + secrets.token_hex(5),
+            external=True,
+            protocol='ss2022',
+            name=name,
+            host=host,
+            port=port,
+            public_port=port,
+            sni='www.microsoft.com',
+            ss_method=method,
+            ss_password=password,
+        )
+    if proto in ('trojan', 'hysteria2'):
+        password = str(item.get('password') or '')
+        if not password:
+            return None
+        sni = str(item.get('sni') or item.get('servername') or default_sni)
+        node = dict(
+            id='ext-' + secrets.token_hex(5),
+            external=True,
+            protocol=proto,
+            name=name,
+            host=host,
+            port=port,
+            public_port=port,
+            sni=sni,
+            password=password,
+            net=net if proto == 'trojan' else 'udp',
+            ws_path=str(ws_opts.get('path') or '/'),
+            ws_host=str(ws_headers.get('Host') or ws_headers.get('host') or ''),
+            service_name=str(grpc_opts.get('grpc-service-name') or ''),
+            self_signed=insecure,
+        )
+        if proto == 'hysteria2' and item.get('obfs') and item.get('obfs-password'):
+            node['obfs'] = str(item['obfs'])
+            node['obfs_password'] = str(item['obfs-password'])
+        return node
+    # tuic
+    user_uuid = str(uuid.UUID(str(item.get('uuid', ''))))
+    password = str(item.get('password') or '')
+    if not password:
+        return None
+    sni = str(item.get('sni') or item.get('servername') or default_sni)
+    return dict(
+        id='ext-' + secrets.token_hex(5),
+        external=True,
+        protocol='tuic',
+        name=name,
+        host=host,
+        port=port,
+        public_port=port,
+        sni=sni,
+        uuid=user_uuid,
+        password=password,
+        self_signed=insecure,
+    )
+
+
+def _is_info_or_dummy_node(node):
+    host = str(node.get('host') or '').lower()
+    if host in ('127.0.0.1', '0.0.0.0', '::1', 'localhost'):
+        return True
+    return bool(_INFO_NODE_RE.search(str(node.get('name') or '')))
+
+
+def parse_subscription_content(raw_text, filter_pattern=''):
+    """Parse a third-party subscription payload (Base64 URI list, plain URI lines, Clash JSON, or Clash YAML)."""
+    text = str(raw_text or '').strip().lstrip('\ufeff')
+    if not text:
+        return []
+
+    parsed_nodes = []
+    # 1. Try JSON Clash config
+    if text.startswith('{'):
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict) and isinstance(obj.get('proxies'), list):
+                for item in obj['proxies']:
+                    try:
+                        n = _clash_dict_to_node(item)
+                        if n:
+                            parsed_nodes.append(n)
+                    except (ValueError, KeyError, TypeError):
+                        continue
+        except ValueError:
+            pass
+
+    # 2. Try Clash YAML proxies: block
+    if not parsed_nodes and re.search(r'^proxies\s*:', text, re.MULTILINE):
+        for item in _parse_clash_yaml_proxies(text):
+            try:
+                n = _clash_dict_to_node(item)
+                if n:
+                    parsed_nodes.append(n)
+            except (ValueError, KeyError, TypeError):
+                continue
+
+    # 3. Try plain URI lines or Base64-encoded URI lines
+    if not parsed_nodes:
+        uri_prefixes = ('vless://', 'vmess://', 'trojan://', 'ss://', 'hysteria2://', 'hy2://', 'tuic://')
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if not any(ln.lower().startswith(uri_prefixes) for ln in lines):
+            compact = ''.join(lines)
+            try:
+                decoded = _b64_decode_padded(compact).decode('utf-8', errors='replace')
+                if any(ln.strip().lower().startswith(uri_prefixes) for ln in decoded.splitlines()):
+                    lines = [ln.strip() for ln in decoded.splitlines() if ln.strip()]
+                elif re.search(r'^proxies\s*:', decoded, re.MULTILINE):
+                    for item in _parse_clash_yaml_proxies(decoded):
+                        try:
+                            n = _clash_dict_to_node(item)
+                            if n:
+                                parsed_nodes.append(n)
+                        except (ValueError, KeyError, TypeError):
+                            continue
+                    lines = []
+            except Exception:
+                pass
+        for ln in lines:
+            if not ln.lower().startswith(uri_prefixes):
+                continue
+            try:
+                parsed_nodes.append(parse_node_uri(ln))
+            except ValueError:
+                continue
+
+    if not parsed_nodes:
+        return []
+
+    non_info = [n for n in parsed_nodes if not _is_info_or_dummy_node(n)]
+    if non_info:
+        parsed_nodes = non_info
+
+    pat = str(filter_pattern or '').strip()
+    if pat:
+        try:
+            rx = re.compile(pat, re.IGNORECASE)
+            parsed_nodes = [n for n in parsed_nodes if rx.search(n['name'])]
+        except re.error:
+            low = pat.lower()
+            parsed_nodes = [n for n in parsed_nodes if low in n['name'].lower()]
+
+    used = set()
+    deduped = []
+    for n in parsed_nodes:
+        base = n['name']
+        cand = base
+        idx = 2
+        while cand in used:
+            cand = valid_name(f'{base[:70]} #{idx}')
+            idx += 1
+        used.add(cand)
+        deduped.append(dict(n, name=cand))
+    return deduped
+
+
+def _unique_name(base, used):
+    cand = valid_name(base)
+    idx = 2
+    while cand in used:
+        cand = valid_name(f'{base[:68]} #{idx}')
+        idx += 1
+    used.add(cand)
+    return cand
+
+
+def _resolve_relay_targets(air, relay_targets):
+    target_ids = list(air.get('target_ids') or [])
+    if not target_ids:
+        return list(relay_targets)
+    return [n for n in relay_targets if n.get('id') in target_ids or n.get('name') in target_ids]
+
+
 def build_relay_proxies(nodes, relay_chains=()):
     """Build Clash proxy objects for `dialer-proxy` relay chains (entry -> landing)."""
     by_name = {n['name']: n for n in nodes}
@@ -872,12 +1435,87 @@ def build_relay_proxies(nodes, relay_chains=()):
     return relays
 
 
-def clash_config(nodes, relay_chains=()):
+def clash_config(nodes, relay_chains=(), airport_relays=(), local_nodes=()):
     # JSON is valid YAML 1.2; avoids PyYAML or a hand-written YAML serializer.
     base_proxies = [clash_proxy(n) for n in nodes]
     relay_proxies = build_relay_proxies(nodes, relay_chains)
-    all_proxies = base_proxies + relay_proxies
-    names = [p['name'] for p in all_proxies]
+    exit_proxies = base_proxies + relay_proxies
+    names = [p['name'] for p in exit_proxies]
+    used_names = set(names) | {'节点选择', '⚡ 自动优选最快', '🛡️ 故障转移', '国内直连', 'DIRECT', 'REJECT'}
+    relay_targets = list(local_nodes) if local_nodes else [
+        n for n in nodes if not n.get('external') and not n.get('cf_domain')
+    ]
+
+    airport_relay_proxies = []
+    extra_front_proxies = []
+    extra_groups = []
+    proxy_providers = {}
+    used_prov = set()
+
+    for air in airport_relays or ():
+        targets = _resolve_relay_targets(air, relay_targets)
+        if not targets:
+            continue
+        air_name = str(air.get('name') or '机场').strip()
+        mode = air.get('mode', 'inline')
+        air_nodes = list(air.get('nodes') or [])
+        front_group = _unique_name(f'🛫 {air_name}前置', used_names)
+        auto_group = _unique_name(f'⚡ {air_name}测速', used_names)
+
+        if mode == 'provider' and air.get('url'):
+            raw_key = 'air_' + (re.sub(r'[^A-Za-z0-9_]+', '_', str(air.get('id') or air_name)).strip('_') or 'sub')
+            prov_key = _unique_name(raw_key, used_prov)
+            prov = {
+                'type': 'http',
+                'url': air['url'],
+                'path': f'./providers/{prov_key}.yaml',
+                'interval': 3600,
+                'exclude-filter': _INFO_NODE_RE.pattern,
+                'health-check': {
+                    'enable': True,
+                    'url': 'http://www.gstatic.com/generate_204',
+                    'interval': 300,
+                },
+            }
+            if air.get('filter_pattern'):
+                prov['filter'] = air['filter_pattern']
+            proxy_providers[prov_key] = prov
+            extra_groups.append({'name': front_group, 'type': 'select', 'proxies': [auto_group], 'use': [prov_key]})
+            extra_groups.append({
+                'name': auto_group,
+                'type': 'url-test',
+                'use': [prov_key],
+                'url': 'http://www.gstatic.com/generate_204',
+                'interval': 300,
+                'tolerance': 50,
+            })
+        elif air_nodes:
+            front_names = []
+            for an in air_nodes:
+                an_name = _unique_name(an['name'], used_names)
+                extra_front_proxies.append(clash_proxy(dict(an, name=an_name)))
+                front_names.append(an_name)
+            if len(front_names) > 1:
+                extra_groups.append({'name': front_group, 'type': 'select', 'proxies': [auto_group] + front_names})
+                extra_groups.append({
+                    'name': auto_group,
+                    'type': 'url-test',
+                    'proxies': front_names,
+                    'url': 'http://www.gstatic.com/generate_204',
+                    'interval': 300,
+                    'tolerance': 50,
+                })
+            else:
+                extra_groups.append({'name': front_group, 'type': 'select', 'proxies': front_names})
+        else:
+            continue
+
+        for t in targets:
+            rname = _unique_name(f"🔗 {air_name}中转 → {t['name']}", used_names)
+            airport_relay_proxies.append(clash_proxy(dict(t, name=rname, dialer_proxy=front_group)))
+            names.append(rname)
+
+    all_proxies = exit_proxies + airport_relay_proxies + extra_front_proxies
     if len(names) > 1:
         groups = [
             {'name': '节点选择', 'type': 'select', 'proxies': ['⚡ 自动优选最快', '🛡️ 故障转移'] + names + ['DIRECT']},
@@ -892,7 +1530,8 @@ def clash_config(nodes, relay_chains=()):
             {'name': '节点选择', 'type': 'select', 'proxies': (names + ['DIRECT']) if names else ['DIRECT']},
             {'name': '国内直连', 'type': 'select', 'proxies': ['DIRECT', '节点选择']},
         ]
-    return {
+    groups.extend(extra_groups)
+    cfg = {
         'mixed-port': 7890,
         'allow-lan': False,
         'bind-address': '*',
@@ -905,6 +1544,9 @@ def clash_config(nodes, relay_chains=()):
         'proxy-groups': groups,
         'rules': list(CHINA_DIRECT_RULES),
     }
+    if proxy_providers:
+        cfg['proxy-providers'] = proxy_providers
+    return cfg
 
 
 def _singbox_route_rules():
@@ -948,7 +1590,7 @@ def _singbox_route_rules():
     return rules
 
 
-def singbox_client_config(nodes, relay_chains=()):
+def singbox_client_config(nodes, relay_chains=(), airport_relays=(), local_nodes=()):
     """Build a standard sing-box client profile compatible with SFA / SFI / SFM / SFX."""
     outbounds = []
     names = []
@@ -973,6 +1615,49 @@ def singbox_client_config(nodes, relay_chains=()):
         ro['tag'] = chain_name
         outbounds.append(ro)
         names.append(chain_name)
+
+    used_names = set(names) | {'节点选择', '⚡ 自动优选最快', 'direct', 'mixed-in'}
+    relay_targets = list(local_nodes) if local_nodes else [
+        n for n in nodes if not n.get('external') and not n.get('cf_domain')
+    ]
+    extra_groups = []
+    airport_relay_outbounds = []
+    extra_front_outbounds = []
+
+    for air in airport_relays or ():
+        air_nodes = list(air.get('nodes') or [])
+        targets = _resolve_relay_targets(air, relay_targets)
+        if not air_nodes or not targets:
+            continue
+        air_name = str(air.get('name') or '机场').strip()
+        front_group = _unique_name(f'🛫 {air_name}前置', used_names)
+        auto_group = _unique_name(f'⚡ {air_name}测速', used_names)
+        front_names = []
+        for an in air_nodes:
+            an_name = _unique_name(an['name'], used_names)
+            ao = outbound(an, local=False)
+            ao['tag'] = an_name
+            extra_front_outbounds.append(ao)
+            front_names.append(an_name)
+        if len(front_names) > 1:
+            extra_groups.append({'type': 'selector', 'tag': front_group, 'outbounds': [auto_group] + front_names})
+            extra_groups.append({
+                'type': 'urltest',
+                'tag': auto_group,
+                'outbounds': front_names,
+                'url': 'https://www.gstatic.com/generate_204',
+                'interval': '3m',
+                'tolerance': 50,
+            })
+        else:
+            extra_groups.append({'type': 'selector', 'tag': front_group, 'outbounds': front_names})
+        for t in targets:
+            rname = _unique_name(f"🔗 {air_name}中转 → {t['name']}", used_names)
+            ro = outbound(dict(t, detour=front_group), local=False)
+            ro['tag'] = rname
+            airport_relay_outbounds.append(ro)
+            names.append(rname)
+
     selector_list = (['⚡ 自动优选最快'] + names + ['direct']) if len(names) > 1 else ((names + ['direct']) if names else ['direct'])
     groups = [{'type': 'selector', 'tag': '节点选择', 'outbounds': selector_list}]
     if len(names) > 1:
@@ -987,7 +1672,7 @@ def singbox_client_config(nodes, relay_chains=()):
     return {
         'log': {'level': 'warn', 'timestamp': True},
         'inbounds': [{'type': 'mixed', 'tag': 'mixed-in', 'listen': '127.0.0.1', 'listen_port': 7890}],
-        'outbounds': groups + outbounds + [{'type': 'direct', 'tag': 'direct'}],
+        'outbounds': groups + extra_groups + outbounds + airport_relay_outbounds + extra_front_outbounds + [{'type': 'direct', 'tag': 'direct'}],
         'route': {
             'rules': _singbox_route_rules(),
             'final': '节点选择',
@@ -995,17 +1680,22 @@ def singbox_client_config(nodes, relay_chains=()):
     }
 
 
-def subscription_bundle(nodes, title='NodeLite', userinfo='', generation=None, relay_chains=()):
-    yaml_text = json.dumps(clash_config(nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2) + '\n'
-    singbox_text = json.dumps(singbox_client_config(nodes, relay_chains=relay_chains), ensure_ascii=False, indent=2) + '\n'
+def subscription_bundle(nodes, title='NodeLite', userinfo='', generation=None, relay_chains=(), airport_relays=(), local_nodes=()):
+    clash_cfg = clash_config(nodes, relay_chains=relay_chains, airport_relays=airport_relays, local_nodes=local_nodes)
+    sb_cfg = singbox_client_config(nodes, relay_chains=relay_chains, airport_relays=airport_relays, local_nodes=local_nodes)
+    yaml_text = json.dumps(clash_cfg, ensure_ascii=False, indent=2) + '\n'
+    singbox_text = json.dumps(sb_cfg, ensure_ascii=False, indent=2) + '\n'
     raw_links = '\n'.join(uri(n) for n in nodes) + ('\n' if nodes else '')
     b64_links = base64.b64encode(raw_links.strip().encode('utf-8')).decode('ascii')
+    manual_relay_count = len(build_relay_proxies(nodes, relay_chains))
+    airport_relay_count = sum(1 for p in clash_cfg['proxies'] if p.get('dialer-proxy')) - manual_relay_count
     meta = {
         'schema': 1,
         'generation': generation or str(uuid.uuid4()),
         'verified': bool(nodes),
         'nodeCount': len(nodes),
-        'relayCount': len(build_relay_proxies(nodes, relay_chains)),
+        'relayCount': manual_relay_count + max(0, airport_relay_count),
+        'airportRelayCount': max(0, airport_relay_count),
         'title': valid_name(title) if title else 'NodeLite',
         'userinfo': str(userinfo or ''),
         'updatedAt': int(time.time()),
