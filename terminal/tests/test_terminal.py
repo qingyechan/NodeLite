@@ -894,7 +894,7 @@ class V030OptimizationTests(unittest.TestCase):
         self.assertEqual(cl_vmess['network'], 'tcp')
         self.assertNotIn('ws-opts', cl_vmess)
 
-        # 3. Sing-box client config must include relay_chains via detour
+        # 3. Sing-box client config must include relay_chains via detour and full synced direct/proxy rules
         front = p.new_node('vless', '入口JP', '203.0.113.10', 10086, 53440, public_key='3zljW9ibrZOUBGnEjPqI2nKASUCkuBVnBR-rFuHsdxw')
         sb_cfg = p.singbox_client_config([front, ext_vless_ws], relay_chains=[
             {'name': '链式Relay', 'front': '入口JP', 'exit': '自定义VLESS-WS'},
@@ -902,10 +902,22 @@ class V030OptimizationTests(unittest.TestCase):
         sb_by_tag = {o['tag']: o for o in sb_cfg['outbounds']}
         self.assertIn('链式Relay', sb_by_tag)
         self.assertEqual(sb_by_tag['链式Relay']['detour'], '入口JP')
+        sb_rules = sb_cfg['route']['rules']
+        direct_suffixes = {s for r in sb_rules if r.get('outbound') == 'direct' for s in r.get('domain_suffix', [])}
+        self.assertTrue({'xiaohongshu.com', 'zhihu.com', 'meituan.com', 'servicewechat.com', 'byteimg.com', '.cn'}.issubset(direct_suffixes))
+        copilot_idx = next(i for i, r in enumerate(sb_rules) if 'copilot.microsoft.com' in r.get('domain_suffix', []))
+        ms_idx = next(i for i, r in enumerate(sb_rules) if 'microsoft.com' in r.get('domain_suffix', []))
+        self.assertEqual(sb_rules[copilot_idx]['outbound'], '节点选择')
+        self.assertEqual(sb_rules[ms_idx]['outbound'], 'direct')
+        self.assertLess(copilot_idx, ms_idx)
 
-        # 4. Clash DNS fallback must route through 节点选择
+        # 4. Clash DNS fallback must route through 节点选择 and copilot precedes microsoft.com
         clash_cfg = p.clash_config([front, ext_vless_ws])
         self.assertTrue(all('#节点选择' in item for item in clash_cfg['dns']['fallback']))
+        self.assertLess(
+            clash_cfg['rules'].index('DOMAIN-SUFFIX,copilot.microsoft.com,节点选择'),
+            clash_cfg['rules'].index('DOMAIN-SUFFIX,microsoft.com,DIRECT'),
+        )
 
         # 5. Reserved proxy group names and cross-node collisions must be rejected
         with tempfile.TemporaryDirectory() as tmp:

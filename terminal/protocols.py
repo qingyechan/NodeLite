@@ -502,6 +502,11 @@ AIRPORT_DNS_CONFIG = {
         '+.openai.com': 'https://dns.cloudflare.com/dns-query#节点选择',
         '+.chatgpt.com': 'https://dns.cloudflare.com/dns-query#节点选择',
         '+.anthropic.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.claude.ai': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.grok.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.x.ai': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.discord.com': 'https://dns.cloudflare.com/dns-query#节点选择',
+        '+.telegram.org': 'https://dns.cloudflare.com/dns-query#节点选择',
     },
     'proxy-server-nameserver': ['223.5.5.5', '119.29.29.29'],
     'nameserver': [
@@ -640,6 +645,10 @@ CHINA_DIRECT_RULES = (
     'DOMAIN-SUFFIX,bilivideo.com,DIRECT',
     'DOMAIN-SUFFIX,hdslb.com,DIRECT',
     'DOMAIN-SUFFIX,biliapi.net,DIRECT',
+    'DOMAIN-SUFFIX,byteimg.com,DIRECT',
+    'DOMAIN-SUFFIX,ibytedtos.com,DIRECT',
+    'DOMAIN-SUFFIX,zijieapi.com,DIRECT',
+    'DOMAIN-SUFFIX,volccdn.com,DIRECT',
     'DOMAIN-SUFFIX,caiyunapp.com,DIRECT',
     'DOMAIN-SUFFIX,clouddn.com,DIRECT',
     'DOMAIN-SUFFIX,cnbeta.com,DIRECT',
@@ -682,6 +691,7 @@ CHINA_DIRECT_RULES = (
     'DOMAIN-SUFFIX,meituan.net,DIRECT',
     'DOMAIN-SUFFIX,mi.com,DIRECT',
     'DOMAIN-SUFFIX,miaopai.com,DIRECT',
+    'DOMAIN-SUFFIX,copilot.microsoft.com,节点选择',
     'DOMAIN-SUFFIX,microsoft.com,DIRECT',
     'DOMAIN-SUFFIX,microsoftonline.com,DIRECT',
     'DOMAIN-SUFFIX,miui.com,DIRECT',
@@ -738,6 +748,7 @@ CHINA_DIRECT_RULES = (
     'DOMAIN-SUFFIX,vmall.com,DIRECT',
     'DOMAIN-SUFFIX,weather.com,DIRECT',
     'DOMAIN-SUFFIX,wechat.com,DIRECT',
+    'DOMAIN-SUFFIX,servicewechat.com,DIRECT',
     'DOMAIN-SUFFIX,weibo.com,DIRECT',
     'DOMAIN-SUFFIX,weibocdn.com,DIRECT',
     'DOMAIN-SUFFIX,weixin.com,DIRECT',
@@ -896,6 +907,47 @@ def clash_config(nodes, relay_chains=()):
     }
 
 
+def _singbox_route_rules():
+    """Convert CHINA_DIRECT_RULES into ordered sing-box route rules without external rule-set downloads."""
+    rules = [{'ip_is_private': True, 'outbound': 'direct'}]
+    type_map = {
+        'DOMAIN': 'domain',
+        'DOMAIN-SUFFIX': 'domain_suffix',
+        'DOMAIN-KEYWORD': 'domain_keyword',
+        'IP-CIDR': 'ip_cidr',
+        'IP-CIDR6': 'ip_cidr',
+    }
+    cur_out = None
+    cur_bucket = {}
+
+    def flush():
+        if cur_out and cur_bucket:
+            rule = dict(cur_bucket)
+            rule['outbound'] = cur_out
+            rules.append(rule)
+
+    for raw in CHINA_DIRECT_RULES:
+        parts = raw.split(',')
+        if len(parts) < 3:
+            continue
+        rtype, val, target = parts[0], parts[1], parts[2]
+        if rtype in ('GEOIP', 'MATCH'):
+            continue
+        sb_key = type_map.get(rtype)
+        if not sb_key:
+            continue
+        out = 'direct' if target == 'DIRECT' else '节点选择'
+        if rtype == 'DOMAIN-SUFFIX' and val in ('cn', 'local', 'lan'):
+            val = '.' + val
+        if out != cur_out:
+            flush()
+            cur_out = out
+            cur_bucket = {}
+        cur_bucket.setdefault(sb_key, []).append(val)
+    flush()
+    return rules
+
+
 def singbox_client_config(nodes, relay_chains=()):
     """Build a standard sing-box client profile compatible with SFA / SFI / SFM / SFX."""
     outbounds = []
@@ -937,13 +989,7 @@ def singbox_client_config(nodes, relay_chains=()):
         'inbounds': [{'type': 'mixed', 'tag': 'mixed-in', 'listen': '127.0.0.1', 'listen_port': 7890}],
         'outbounds': groups + outbounds + [{'type': 'direct', 'tag': 'direct'}],
         'route': {
-            'rules': [
-                {'ip_is_private': True, 'outbound': 'direct'},
-                {'domain_suffix': ['.cn', '.local', '.lan', 'baidu.com', 'qq.com', 'taobao.com', 'tmall.com',
-                                   'jd.com', 'bilibili.com', 'douyin.com', 'qianwen.com', 'tongyi.com',
-                                   'deepseek.com', 'aliyun.com', 'alicdn.com', 'wechat.com', '163.com'],
-                 'outbound': 'direct'},
-            ],
+            'rules': _singbox_route_rules(),
             'final': '节点选择',
         },
     }
